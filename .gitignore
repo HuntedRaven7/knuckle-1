@@ -32,6 +32,8 @@ cover.html
 
 # ISO build artifacts
 .iso-build/
+.fcos-iso-build/
+.ucore-iso-build/
 output/
 cover_tui.out
 

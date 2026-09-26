@@ -104,9 +104,13 @@ func TestNextAndPrevious(t *testing.T) {
 	if err := w.Next(); err != nil {
 		t.Fatalf("Next from Welcome: %v", err)
 	}
-	// StepNetwork -> StepStorage: DHCP passes
+	// StepNetwork -> StepWifi: DHCP passes
 	if err := w.Next(); err != nil {
 		t.Fatalf("Next from Network (DHCP): %v", err)
+	}
+	// StepWifi -> StepStorage: always passes, skipping is valid
+	if err := w.Next(); err != nil {
+		t.Fatalf("Next from Wifi: %v", err)
 	}
 	// StepStorage -> StepUser: need disk
 	w.State.Config.Disk.DevPath = "/dev/sda"
@@ -398,9 +402,11 @@ func TestIsFirstAndLastStep(t *testing.T) {
 }
 
 func TestStepCount(t *testing.T) {
+	// StepCount is derived from the WizardStep enum, so it must grow with it.
+	// 13 = the 11 original steps plus StepUcore and StepWifi.
 	count := StepCount()
-	if count != 11 {
-		t.Errorf("expected 11 steps (added StepTailscale), got %d", count)
+	if count != 13 {
+		t.Errorf("expected 13 steps (added StepUcore and StepWifi), got %d", count)
 	}
 }
 
@@ -838,7 +844,12 @@ func TestFullHappyPath_WelcomeToDone(t *testing.T) {
 	// StepNetwork — DHCP (passes without any config)
 	w.State.Config.Network.Mode = model.NetworkDHCP
 	if err := w.Next(); err != nil {
-		t.Fatalf("Network→Storage: %v", err)
+		t.Fatalf("Network→Wifi: %v", err)
+	}
+
+	// StepWifi — optional, skipping is valid
+	if err := w.Next(); err != nil {
+		t.Fatalf("Wifi→Storage: %v", err)
 	}
 
 	// StepStorage — select a disk
@@ -1076,7 +1087,7 @@ func TestFullHappyPath_WithNvidia(t *testing.T) {
 
 	// Walk all the way through
 	steps := []model.WizardStep{
-		model.StepWelcome, model.StepNetwork, model.StepStorage,
+		model.StepWelcome, model.StepNetwork, model.StepWifi, model.StepStorage,
 		model.StepUser, model.StepSysext, model.StepNvidia,
 		model.StepUpdate, model.StepReview, model.StepInstall,
 	}
@@ -1268,7 +1279,8 @@ func TestRouteA_DHCP_GitHubKeys_NoSysext(t *testing.T) {
 
 	// ── Network: DHCP ─────────────────────────────────────────────────────
 	w.State.Config.Network.Mode = model.NetworkDHCP
-	st.record(w, t, "Network→Storage")
+	st.record(w, t, "Network→Wifi")
+	st.record(w, t, "Wifi→Storage")
 	if w.State.CurrentStep != model.StepStorage {
 		t.Fatalf("after Network: expected StepStorage, got %v", w.State.CurrentStep)
 	}
@@ -1341,6 +1353,7 @@ func TestRouteA_DHCP_GitHubKeys_NoSysext(t *testing.T) {
 	// ── Verify exact step sequence ────────────────────────────────────────
 	assertStepSequence(t, st.visited, []model.WizardStep{
 		model.StepNetwork,
+		model.StepWifi,
 		model.StepStorage,
 		model.StepUser,
 		model.StepSysext,
@@ -1408,7 +1421,8 @@ func TestRouteB_StaticNetwork_PasswordUser_DockerSysext(t *testing.T) {
 	if err := w.ValidateCurrentStep(); err != nil {
 		t.Fatalf("static network should pass validation: %v", err)
 	}
-	st.record(w, t, "Network→Storage")
+	st.record(w, t, "Network→Wifi")
+	st.record(w, t, "Wifi→Storage")
 
 	// ── Storage ───────────────────────────────────────────────────────────
 	w.State.Config.Disk = model.DiskInfo{DevPath: "/dev/disk/by-id/nvme-WDC_WD1003FZEX_WD-WCC4K0123456"}
@@ -1475,6 +1489,7 @@ func TestRouteB_StaticNetwork_PasswordUser_DockerSysext(t *testing.T) {
 	// ── Exact step sequence (StepNvidia absent) ───────────────────────────
 	assertStepSequence(t, st.visited, []model.WizardStep{
 		model.StepNetwork,
+		model.StepWifi,
 		model.StepStorage,
 		model.StepUser,
 		model.StepSysext,
@@ -1609,7 +1624,8 @@ func TestRouteC_IgnitionURL_TUISkip_StorageThenReview(t *testing.T) {
 	}
 
 	// ── Verify only Storage, Review, Install, Done were visited ──────────
-	// (Network/User/Sysext/Update/Nvidia never appear)
+	// (Network/Wifi/User/Sysext/Update/Nvidia never appear: an external
+	// Ignition URL jumps straight from Welcome to Storage)
 	wantVisited := []model.WizardStep{
 		model.StepStorage,
 		model.StepReview,
@@ -1650,7 +1666,8 @@ func TestRouteD_NvidiaRuntime_DriverSetup(t *testing.T) {
 
 	// ── Network: DHCP ─────────────────────────────────────────────────────
 	w.State.Config.Network.Mode = model.NetworkDHCP
-	st.record(w, t, "Network→Storage")
+	st.record(w, t, "Network→Wifi")
+	st.record(w, t, "Wifi→Storage")
 
 	// ── Storage ───────────────────────────────────────────────────────────
 	w.State.Config.Disk = model.DiskInfo{DevPath: "/dev/disk/by-id/nvme-TOSHIBA_KXG60ZNV256G_12345ABCDE"}
@@ -1706,6 +1723,7 @@ func TestRouteD_NvidiaRuntime_DriverSetup(t *testing.T) {
 	// ── Exact step sequence: StepNvidia IS present ────────────────────────
 	assertStepSequence(t, st.visited, []model.WizardStep{
 		model.StepNetwork,
+		model.StepWifi,
 		model.StepStorage,
 		model.StepUser,
 		model.StepSysext,

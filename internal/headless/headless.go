@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/projectbluefin/knuckle/internal/bakery"
@@ -20,7 +21,10 @@ import (
 // Config is the JSON schema for headless install configuration.
 // It maps closely to model.InstallConfig but uses simpler types for JSON.
 type Config struct {
-	OS                  string          `json:"os,omitempty"`   // "flatcar" or "fcos"; defaults to "flatcar"
+	OS string `json:"os,omitempty"` // "flatcar", "fcos", "ucore" or "bluefin-ddi"; defaults to "flatcar"
+	// Ucore selects the uCore OCI image to install. Only read when os is
+	// "ucore"; nil or omitted fields take the uCore defaults.
+	Ucore               *UcoreConfig    `json:"ucore,omitempty"`
 	Arch                string          `json:"arch,omitempty"` // "amd64" or "arm64"; defaults to "amd64"
 	Channel             string          `json:"channel"`
 	Version             string          `json:"version,omitempty"`
@@ -30,6 +34,7 @@ type Config struct {
 	Users               []UserConfig    `json:"users"`
 	Disk                string          `json:"disk"`
 	Sysexts             []string        `json:"sysexts,omitempty"`
+	Wifi                *WifiConfig     `json:"wifi,omitempty"`
 	NvidiaDriverVersion string          `json:"nvidia_driver_version,omitempty"` // e.g. "570-open"; empty = no NVIDIA kernel driver
 	Swap                *SwapConfig     `json:"swap,omitempty"`                  // nil = default-on (4 GiB); pass {"enabled":false} to disable
 	Tailscale           TailscaleConfig `json:"tailscale,omitempty"`
@@ -37,6 +42,98 @@ type Config struct {
 	IgnitionURL         string          `json:"ignition_url,omitempty"`
 	Reboot              bool            `json:"reboot"`
 	DryRun              bool            `json:"dry_run,omitempty"`
+}
+
+// WifiConfig is the JSON schema for WiFi provisioning. The TUI collects this
+// with nmtui; headless has no terminal, so the keyfiles are supplied directly.
+type WifiConfig struct {
+	Profiles []WifiProfile `json:"profiles,omitempty"`
+}
+
+// WifiProfile is one NetworkManager keyfile to copy onto the target.
+type WifiProfile struct {
+	// Filename becomes a path under /etc/NetworkManager/system-connections, so
+	// it is validated before use.
+	Filename string `json:"filename"`
+	// Contents is the keyfile body, including any PSK. This is a secret.
+	Contents string `json:"contents"`
+}
+
+// ToModel converts the JSON schema to the model's WiFi selection.
+func (w *WifiConfig) ToModel() model.WifiConfig {
+	if w == nil || len(w.Profiles) == 0 {
+		return model.WifiConfig{}
+	}
+	out := make([]model.WifiProfile, 0, len(w.Profiles))
+	for _, p := range w.Profiles {
+		out = append(out, model.WifiProfile{
+			Filename: p.Filename,
+			// SSID is display-only; take the first one that parses.
+			SSID:     wifiSSID(p.Contents),
+			Secured:  wifiHasPSK(p.Contents),
+			Contents: p.Contents,
+		})
+	}
+	return model.WifiConfig{Enabled: true, Profiles: out}
+}
+
+// wifiSSID pulls the display name out of a keyfile's [wifi] section. It is
+// best-effort: a value the TUI shows, never anything load-bearing.
+func wifiSSID(contents string) string {
+	inWifi := false
+	for _, line := range strings.Split(contents, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "["):
+			inWifi = strings.EqualFold(line, "[wifi]")
+		case inWifi && strings.HasPrefix(line, "ssid="):
+			return strings.Trim(strings.TrimPrefix(line, "ssid="), `"`)
+		}
+	}
+	return ""
+}
+
+// wifiHasPSK reports whether the keyfile carries a pre-shared key, so the UI can
+// label the network as secured or open.
+func wifiHasPSK(contents string) bool {
+	for _, line := range strings.Split(contents, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "psk=") {
+			return true
+		}
+	}
+	return false
+}
+
+// UcoreConfig is the JSON schema for the uCore image selection. Every field is
+// optional: omitted fields fall back to the model defaults (full image, stable
+// stream, no NVIDIA driver, signature-verified).
+//
+// Only consulted when Config.OS is "ucore". For that OS, "channel" is ignored —
+// uCore has its own stream vocabulary, so "ucore.stream" is the single knob.
+type UcoreConfig struct {
+	Image  string `json:"image,omitempty"`  // "ucore" (default), "ucore-minimal", "ucore-hci"
+	Stream string `json:"stream,omitempty"` // "stable" (default), "testing", "lts"
+	Nvidia string `json:"nvidia,omitempty"` // "" (default, none), "nvidia", "nvidia-lts"
+	// Verify selects the rpm-ostree transport: "signed" (default) enforces the
+	// image's sigstore signature, "unverified" does not.
+	Verify string `json:"verify,omitempty"`
+}
+
+// ToModel converts the JSON schema to the model's uCore selection, applying
+// defaults for omitted fields.
+func (u *UcoreConfig) ToModel() model.UcoreConfig {
+	if u == nil {
+		// An omitted block is a valid "give me the defaults" request, so it
+		// must be normalised the same way as an empty one.
+		return model.UcoreConfig{}.WithDefaults()
+	}
+	return model.UcoreConfig{
+		Image:  u.Image,
+		Stream: u.Stream,
+		Nvidia: u.Nvidia,
+		Verify: u.Verify,
+	}.WithDefaults()
 }
 
 // TailscaleConfig for JSON input. Empty AuthKey skips the integration.
@@ -104,6 +201,8 @@ func (c *Config) ToInstallConfig() *model.InstallConfig {
 		Hostname: c.Hostname,
 		Timezone: c.Timezone,
 		DryRun:   c.DryRun,
+		Ucore:    c.Ucore.ToModel(),
+		Wifi:     c.Wifi.ToModel(),
 	}
 
 	// Set defaults
@@ -229,17 +328,20 @@ func resolveSysexts(ctx context.Context, names []string, client bakery.Client, a
 // Validate checks the headless config for errors using the same validation
 // as the TUI wizard path.
 func (c *Config) Validate() error {
-	// OS
-	if c.OS != "" && c.OS != model.OSFlatcar && c.OS != model.OSFCOS {
-		return fmt.Errorf("os: must be %q or %q (got %q)", model.OSFlatcar, model.OSFCOS, c.OS)
+	// OS — the roster is the single source of truth for accepted values, so
+	// adding a target cannot leave this list behind.
+	if c.OS != "" && !model.IsKnownOS(c.OS) {
+		ids := model.OSTargetIDs()
+		return fmt.Errorf("os: must be one of %s (got %q)", strings.Join(ids, ", "), c.OS)
 	}
 
 	// Arch
 	if c.Arch != "" && c.Arch != "amd64" && c.Arch != "arm64" {
 		return fmt.Errorf("arch: must be \"amd64\" or \"arm64\" (got %q)", c.Arch)
 	}
-	// LTS is not available for arm64 on Flatcar (FCOS has no lts stream)
-	if c.Arch == "arm64" && c.Channel == "lts" && c.OS != model.OSFCOS {
+	// LTS is not available for arm64 on Flatcar. CoreOS derivatives are exempt:
+	// FCOS has no lts stream at all, and uCore's lts stream ships on both arches.
+	if c.Arch == "arm64" && c.Channel == "lts" && !model.IsCoreOSDerivative(c.OS) {
 		return fmt.Errorf("arch: LTS channel is not available for arm64")
 	}
 
@@ -256,9 +358,28 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	// Version — FCOS uses a different version scheme and coreos-installer does
-	// not support stream-based version pinning in v1; ignore with a warning.
-	if c.OS != model.OSFCOS {
+	// uCore image selection. Normalised first so omitted fields take defaults
+	// instead of tripping the validators on "".
+	if c.OS == model.OSUcore {
+		uc := c.Ucore.ToModel()
+		if err := validate.UcoreImage(uc.Image); err != nil {
+			return fmt.Errorf("ucore.image: %w", err)
+		}
+		if err := validate.UcoreStream(uc.Stream); err != nil {
+			return fmt.Errorf("ucore.stream: %w", err)
+		}
+		if err := validate.UcoreNvidia(uc.Nvidia); err != nil {
+			return fmt.Errorf("ucore.nvidia: %w", err)
+		}
+		if err := validate.UcoreVerifyMode(uc.Verify); err != nil {
+			return fmt.Errorf("ucore.verify: %w", err)
+		}
+	}
+
+	// Version — CoreOS derivatives use a different version scheme and
+	// coreos-installer does not support stream-based version pinning in v1;
+	// ignore with a warning.
+	if !model.IsCoreOSDerivative(c.OS) {
 		if err := validate.FlatcarVersion(c.Version); err != nil {
 			return fmt.Errorf("version: %w", err)
 		}
@@ -288,6 +409,19 @@ func (c *Config) Validate() error {
 			DNS:       c.Network.DNS,
 		}); err != nil {
 			return err
+		}
+	}
+
+	// WiFi profiles — the filename becomes a path on the target disk, so it is
+	// validated here rather than at write time.
+	if c.Wifi != nil {
+		for i, p := range c.Wifi.Profiles {
+			if err := validate.WifiProfileFilename(p.Filename); err != nil {
+				return fmt.Errorf("wifi.profiles[%d].filename: %w", i, err)
+			}
+			if strings.TrimSpace(p.Contents) == "" {
+				return fmt.Errorf("wifi.profiles[%d].contents: must not be empty", i)
+			}
 		}
 	}
 
@@ -351,9 +485,9 @@ func (c *Config) Validate() error {
 	if !validStrategies[c.UpdateStrategy] {
 		return fmt.Errorf("update_strategy: must be reboot, off, or etcd-lock (got %q)", c.UpdateStrategy)
 	}
-	// etcd-lock is Flatcar-only (zincati, used by FCOS, has no equivalent)
-	if c.OS == model.OSFCOS && c.UpdateStrategy == "etcd-lock" {
-		return fmt.Errorf("update_strategy: etcd-lock is not supported for FCOS (use reboot or off)")
+	// etcd-lock is Flatcar-only (zincati, used by FCOS and uCore, has no equivalent)
+	if model.IsCoreOSDerivative(c.OS) && c.UpdateStrategy == "etcd-lock" {
+		return fmt.Errorf("update_strategy: etcd-lock is not supported for %s (use reboot or off)", c.OS)
 	}
 
 	// Swap size must be within [0, MaxSwapSizeMB]

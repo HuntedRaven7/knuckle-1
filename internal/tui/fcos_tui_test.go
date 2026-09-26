@@ -252,8 +252,9 @@ func TestReviewSummary_FCOSShowsOSRow(t *testing.T) {
 	m := New(w)
 
 	out := m.reviewSummary()
-	if !strings.Contains(out, "OS: fcos") {
-		t.Errorf("reviewSummary should show OS row for FCOS: %q", out)
+	// The summary shows the product name, not the raw OS discriminator.
+	if !strings.Contains(out, "OS: Fedora CoreOS") {
+		t.Errorf("reviewSummary should show the FCOS product name: %q", out)
 	}
 }
 

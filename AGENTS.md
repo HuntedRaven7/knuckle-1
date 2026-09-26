@@ -16,9 +16,11 @@
 
 ## What This Repo Is
 
-A TUI installer for [Flatcar Container Linux](https://www.flatcar.org/) and [FCOS](https://fedoraproject.org/coreos/), targeting bare-metal.
+A TUI installer for [Flatcar Container Linux](https://www.flatcar.org/), [FCOS](https://fedoraproject.org/coreos/),
+and [uCore](https://github.com/ublue-os/ucore), targeting bare-metal.
 Built in Go on charm.sh (Bubble Tea v2, Lip Gloss v2, Huh v2). Assembles an Ignition config
-and dispatches to `flatcar-install` (Flatcar) or `coreos-installer` (FCOS) via `DispatchingInstaller` — knuckle never writes partitions itself.
+and dispatches to `flatcar-install` (Flatcar), `coreos-installer` (FCOS and uCore), or a
+systemd DDI flow (Bluefin Server) via `DispatchingInstaller` — knuckle never writes partitions itself.
 
 - **Module:** `github.com/projectbluefin/knuckle` (Go 1.26+)
 - **License:** Apache-2.0
@@ -31,6 +33,25 @@ and dispatches to `flatcar-install` (Flatcar) or `coreos-installer` (FCOS) via `
 - Networking: DHCP + simple static IPv4 only
 - Sysexts: official Flatcar Bakery entries only (via GitHub Releases API)
 - Config: guided TUI OR external Ignition URL passthrough (`Ctrl+A`) — mutually exclusive
+
+**OS targets:** `flatcar`, `fcos`, `ucore`, `bluefin-ddi` — the roster in
+`internal/model/model.go` is the single source of truth. Adding one there
+requires updating the dispatchers, the wizard step gates, and the coverage
+gates in the same PR.
+
+**uCore has no ISO.** It is an OCI image on `ghcr.io`; its GitHub releases are
+changelogs with no assets. knuckle installs it the way uCore documents:
+`coreos-installer` lays down a CoreOS deployment, then an Ignition oneshot
+(`ucore-knuckle-autorebase.service`) rebases onto the uCore image on first boot.
+The uCore installer ISO therefore uses the stock FCOS live ISO as its medium.
+Don't "fix" this by looking for a uCore ISO — there isn't one.
+
+**Never embed a large file in a live ignition.** `coreos-installer` embeds
+`--live-ignition` inside the compressed initramfs, capped at 262144 bytes; the
+build dies with `Compressed initramfs is too large`. The live rootfs is not an
+escape hatch either — it is a read-only EROFS image. Put binaries on the ISO
+with `xorriso -map ... -boot_image any replay` and stage them at boot.
+See `docs/skills/testlab.md` § ISO Architecture.
 
 Anything outside this list belongs in an issue, not a PR.
 
@@ -62,6 +83,8 @@ just headless-test       # config-gen e2e (CI gate, runs on host)
 just vm                  # install in QEMU → auto-boots installed system after
 just vm-e2e              # automated 4-pass: DHCP · static · sysext · NVIDIA
 just boot-iso            # build ISO → boot in QEMU GTK window (requires -cpu host)
+just build-fcos-iso      # FCOS live ISO with knuckle (stable, amd64)
+just build-ucore-iso     # uCore installer ISO (live medium is FCOS; target is uCore)
 just e2e                 # build ISO → boot in QEMU GTK window → interactive install
 ```
 
@@ -77,7 +100,7 @@ just e2e                 # build ISO → boot in QEMU GTK window → interactive
 2. **All system commands route through `internal/runner`.** No `exec.Command` outside that package. Reboot wired via `rebootFn func(context.Context) error` injected from `cmd/knuckle/main.go`.
 3. **Disk identity is `/dev/disk/by-id`.** Never trust `/dev/sdX` enumeration order.
 4. **Never log to stdout.** Bubble Tea owns it. Use `log/slog` with a file handler (`/tmp/knuckle.log` default).
-5. **Ignition contains secrets.** Write with `os.CreateTemp` (O_EXCL), `chmod 0600`, `defer os.Remove`. See `internal/install/install.go:WriteIgnitionFile`.
+5. **Ignition contains secrets.** Write with `os.CreateTemp` (O_EXCL), `chmod 0600`, `defer os.Remove`. See `internal/install/install.go:WriteIgnitionFile`. Captured WiFi keyfiles are secrets too — never log a profile's `Contents`, and never render it in a dry-run view.
 
 ---
 
@@ -95,7 +118,7 @@ Coverage gates are authoritative in [`docs/CI-AND-TESTING.md`](docs/CI-AND-TESTI
 | `internal/bakery`   | `DispatchingClient` routing to Flatcar or FCOS bakery clients; sysext catalog + release/SBOM fetchers, SHA512 + GPG check|
 | `internal/github`   | SSH key fetch + GitHub Releases API client                        |
 | `internal/ignition` | Butane assembly + in-process Butane→Ignition compilation          |
-| `internal/install`  | `DispatchingInstaller` routing to `FlatcarInstaller` or `FCOSInstaller` via runner |
+| `internal/install`  | `DispatchingInstaller` routing to `FlatcarInstaller`, `FCOSInstaller`, `UcoreInstaller` or `BluefinDDIInstaller` via runner |
 | `internal/iso`      | Installer ISO builder helpers                                     |
 | `internal/headless` | `--headless --config` JSON-driven install path                    |
 | `internal/wizard`   | Step state machine, navigation, validation gates                  |
@@ -106,7 +129,7 @@ Coverage gates are authoritative in [`docs/CI-AND-TESTING.md`](docs/CI-AND-TESTI
 ```
 model    ← leaf, zero internal imports
 runner   ← probe, install, headless (injected via interface)
-validate ← tui, ignition, headless
+validate ← tui, ignition, headless, probe
 probe    ← wizard/tui
 bakery   ← wizard/tui
 github   ← wizard
@@ -121,7 +144,7 @@ tui      ← cmd/knuckle
 
 ## Architecture Decisions
 
-1. **Runner abstraction.** Every external command through `internal/runner.Runner` — `RealRunner` (prod), `DryRunner` (no-op), `SpyRunner` (test recorder).
+1. **Runner abstraction.** Every external command through `internal/runner.Runner` — `RealRunner` (prod), `DryRunner` (no-op), `SpyRunner` (test recorder). A program that needs the **terminal** (e.g. the WiFi step's `nmtui`) instead goes through `runner.InteractiveCommand` + `tea.ExecProcess`, which keeps `exec.Command` inside the runner package while letting the child own the TTY.
 2. **Flatcar Butane variant.** `variant: flatcar` compiled in-process via `ignition.CompileToIgnition()`. No `butane` CLI on target. See `docs/BUTANE-DEPENDENCY.md`.
 3. **Mutually exclusive config modes.** Guided TUI OR external Ignition URL. No merge logic.
 4. **Disk identity via `/dev/disk/by-id`.** Falls back to raw device path only when `/dev/disk/by-id/` absent (CI containers). See `internal/probe/probe.go:resolveByIDPath`.

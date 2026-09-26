@@ -45,6 +45,13 @@ func TestFullFlowE2E(t *testing.T) {
 		cmd = m.activeForm.Init()
 		m = runCmds(t, m, cmd, 10)
 	}
+	steps = append(steps, captureStep(t, m, "Wifi"))
+
+	// Step 2b: WiFi (manual step) - skip, since Enter would hand the
+	// terminal to nmtui, which is not available in a test.
+	wifiModel, wifiCmd := m.handleWifiKey(tea.KeyPressMsg{Code: 's', Text: "s"})
+	m = wifiModel.(*Model)
+	m = runCmds(t, m, wifiCmd, 10)
 	steps = append(steps, captureStep(t, m, "Storage"))
 
 	// Step 3: Storage (non-form) - press Enter

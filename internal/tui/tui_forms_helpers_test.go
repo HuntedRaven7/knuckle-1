@@ -161,7 +161,8 @@ func TestOnFormComplete_NetworkAdvances(t *testing.T) {
 	m.networkModeInput = "dhcp"
 	m.initForm()
 	_ = m.onFormComplete()
-	if w.State.CurrentStep != model.StepStorage {
-		t.Errorf("network onFormComplete should advance to StepStorage, got %v", w.State.CurrentStep)
+	// Network hands off to the WiFi step, which the user then skips.
+	if w.State.CurrentStep != model.StepWifi {
+		t.Errorf("network onFormComplete should advance to StepWifi, got %v", w.State.CurrentStep)
 	}
 }

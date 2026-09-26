@@ -178,6 +178,86 @@ func FCOSStream(s string) error {
 	return fmt.Errorf("invalid FCOS stream %q: must be one of stable, testing, next", s)
 }
 
+// reSafeKeyfileName matches basenames that are safe to join onto a directory
+// and write verbatim: letters, digits, dot, underscore, hyphen. No slashes, no
+// parent references, no leading dot.
+var reSafeKeyfileName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+// WifiProfileFilename validates the basename of a NetworkManager keyfile.
+//
+// The name is joined onto NMConnectionDir to build the path written into the
+// target's Ignition config, so a name containing a path separator or ".." could
+// write outside the profile directory. Names arrive from listing a directory on
+// the installer, which is attacker-influenced in the general case, so this is
+// checked rather than assumed.
+func WifiProfileFilename(name string) error {
+	if name == "" {
+		return fmt.Errorf("wifi profile filename must not be empty")
+	}
+	if !reSafeKeyfileName.MatchString(name) {
+		return fmt.Errorf("wifi profile filename %q must start with a letter or digit "+
+			"and contain only letters, digits, dot, underscore or hyphen", name)
+	}
+	if name == "." || name == ".." || strings.Contains(name, "..") {
+		return fmt.Errorf("wifi profile filename %q must not contain a parent-directory reference", name)
+	}
+	return nil
+}
+
+// UcoreStream validates a uCore release stream name.
+//
+// uCore's stream vocabulary is its own, not Flatcar's and not FCOS's: it has
+// "lts" (which Flatcar also has, meaning something different) and lacks
+// "beta", "alpha" and "edge".
+func UcoreStream(s string) error {
+	for _, v := range model.UcoreStreams {
+		if s == v {
+			return nil
+		}
+	}
+	return fmt.Errorf("invalid uCore stream %q: must be one of %s", s, strings.Join(model.UcoreStreams, ", "))
+}
+
+// UcoreImage validates a uCore image family.
+func UcoreImage(s string) error {
+	for _, img := range model.UcoreImages {
+		if s == img.ID {
+			return nil
+		}
+	}
+	ids := make([]string, 0, len(model.UcoreImages))
+	for _, img := range model.UcoreImages {
+		ids = append(ids, img.ID)
+	}
+	return fmt.Errorf("invalid uCore image %q: must be one of %s", s, strings.Join(ids, ", "))
+}
+
+// UcoreNvidia validates a uCore NVIDIA tag suffix. The empty string is valid
+// and means "no NVIDIA driver".
+func UcoreNvidia(s string) error {
+	for _, v := range model.UcoreNvidiaVariants {
+		if s == v {
+			return nil
+		}
+	}
+	return fmt.Errorf("invalid uCore NVIDIA variant %q: must be one of \"\", %s, %s",
+		s, model.UcoreNvidiaOpen, model.UcoreNvidiaLTS)
+}
+
+// UcoreVerifyMode validates a uCore image signature mode.
+//
+// The distinction is security-relevant: UcoreVerifySigned makes rpm-ostree
+// enforce the image's sigstore signature, UcoreVerifyUnverified does not.
+func UcoreVerifyMode(s string) error {
+	switch s {
+	case model.UcoreVerifySigned, model.UcoreVerifyUnverified:
+		return nil
+	default:
+		return fmt.Errorf("invalid uCore verify mode %q: must be %q or %q",
+			s, model.UcoreVerifySigned, model.UcoreVerifyUnverified)
+	}
+}
+
 // URL validates a basic URL format (must start with http:// or https://).
 func URL(s string) error {
 	if !strings.HasPrefix(s, "http://") && !strings.HasPrefix(s, "https://") {
@@ -244,9 +324,33 @@ func GroupName(name string) error {
 
 // CheckConsistency validates the overall config for conflicting settings.
 func CheckConsistency(cfg *model.InstallConfig) error {
-	// NVIDIA driver version is Flatcar-only regardless of ignition_url mode
+	// NVIDIA driver version is Flatcar-only regardless of ignition_url mode.
+	// The two CoreOS derivatives reject it for different reasons, so they get
+	// distinct messages: FCOS ships no NVIDIA driver at all, while uCore bakes
+	// one into its image tag.
 	if cfg.OS == model.OSFCOS && cfg.NvidiaDriverVersion != "" {
 		return fmt.Errorf("nvidia_driver_version: not supported on FCOS")
+	}
+	if cfg.OS == model.OSUcore && cfg.NvidiaDriverVersion != "" {
+		return fmt.Errorf("nvidia_driver_version: not supported on uCore (select a driver with the uCore nvidia image variant instead)")
+	}
+
+	// uCore image selection is only meaningful for a uCore install, and an
+	// unset field is normalised to the defaults rather than rejected.
+	if cfg.OS == model.OSUcore {
+		uc := cfg.Ucore.WithDefaults()
+		if err := UcoreImage(uc.Image); err != nil {
+			return fmt.Errorf("ucore.image: %w", err)
+		}
+		if err := UcoreStream(uc.Stream); err != nil {
+			return fmt.Errorf("ucore.stream: %w", err)
+		}
+		if err := UcoreNvidia(uc.Nvidia); err != nil {
+			return fmt.Errorf("ucore.nvidia: %w", err)
+		}
+		if err := UcoreVerifyMode(uc.Verify); err != nil {
+			return fmt.Errorf("ucore.verify: %w", err)
+		}
 	}
 
 	// External Ignition URL mode: only disk is required, skip auth/network checks
@@ -285,8 +389,10 @@ func CheckConsistency(cfg *model.InstallConfig) error {
 	if cfg.Disk.DevPath == "" {
 		return fmt.Errorf("no disk selected")
 	}
-	// Channel must be valid
-	if cfg.Channel == "" {
+	// Channel must be valid. uCore is exempt: its release stream lives in
+	// Ucore.Stream and Channel is not consulted for that target at all, so
+	// requiring one would block a correctly-populated uCore config.
+	if cfg.Channel == "" && cfg.OS != model.OSUcore {
 		return fmt.Errorf("no channel selected")
 	}
 

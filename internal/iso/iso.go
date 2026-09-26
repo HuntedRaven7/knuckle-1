@@ -1,6 +1,10 @@
 // Package iso generates Ignition configs and helpers for building
 // self-contained installer disk images with knuckle embedded.
-// Supports both Flatcar Container Linux and Fedora CoreOS (FCOS).
+// Supports Flatcar Container Linux, Fedora CoreOS (FCOS), and uCore.
+//
+// The live installer medium is always the upstream live image of the base
+// distribution — uCore publishes no ISO of its own, so its installer runs on
+// the stock FCOS live image and installs uCore onto the target disk.
 package iso
 
 import (
@@ -91,16 +95,19 @@ WantedBy=multi-user.target`
 // booting with this config (via squashfs overlay for Flatcar, or an Ignition
 // storage.files entry for FCOS).
 //
-// os selects the OS-specific service unit body: model.OSFCOS picks the FCOS
-// unit (which includes Conflicts/Before for getty@tty1.service); any other
-// value (including model.OSFlatcar or "") picks the Flatcar unit.
+// os selects the OS-specific service unit body. The Fedora CoreOS family
+// (FCOS and uCore, which is a CoreOS derivative) gets the FCOS unit, which
+// includes Conflicts/Before for getty@tty1.service to stop the live image's
+// autologin getty from fighting the TUI for the console. Flatcar live does not
+// autologin on tty1, so any other value (including model.OSFlatcar or "")
+// picks the Flatcar unit.
 //
 // If sshPubKey is non-empty, it is added to the "core" user for debug access.
 func GenerateInstallerIgnition(os, sshPubKey string) ([]byte, error) {
 	enabled := true
 
 	serviceUnit := knuckleServiceUnitFlatcar
-	if os == model.OSFCOS {
+	if model.IsCoreOSDerivative(os) {
 		serviceUnit = knuckleServiceUnitFCOS
 	}
 

@@ -173,8 +173,9 @@ func TestMaxCursor(t *testing.T) {
 		expected int
 	}{
 		{
-			step:     model.StepWelcome,
-			expected: 3, // OS picker (Flatcar | FCOS | Bluefin Server) — shown first via osSubView
+			step: model.StepWelcome,
+			// The OS picker cursor ceiling is the roster size.
+			expected: len(model.OSTargetIDs()),
 		},
 		{
 			step: model.StepStorage,
@@ -436,8 +437,9 @@ func TestHandleKey_ShiftTabGoesBack(t *testing.T) {
 	// Shift+Tab goes back to previous step
 	newModel, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
 	tuiModel := newModel.(*Model)
-	if tuiModel.Wizard.State.CurrentStep != model.StepNetwork {
-		t.Errorf("expected StepNetwork after shift+tab, got %v", tuiModel.Wizard.State.CurrentStep)
+	// Storage is preceded by the WiFi step.
+	if tuiModel.Wizard.State.CurrentStep != model.StepWifi {
+		t.Errorf("expected StepWifi after shift+tab, got %v", tuiModel.Wizard.State.CurrentStep)
 	}
 }
 

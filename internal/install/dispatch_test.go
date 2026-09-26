@@ -66,6 +66,45 @@ func TestDispatchingInstaller_FCOS(t *testing.T) {
 	}
 }
 
+func TestDispatchingInstaller_Ucore(t *testing.T) {
+	flatcar := &stubInstaller{}
+	fcos := &stubInstaller{}
+	ucore := &stubInstaller{}
+	d := &install.DispatchingInstaller{Flatcar: flatcar, FCOS: fcos, Ucore: ucore}
+
+	cfg := &model.InstallConfig{OS: model.OSUcore}
+	if err := d.Install(context.Background(), cfg, func(string) {}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !ucore.called {
+		t.Fatal("expected uCore installer to be called")
+	}
+	// uCore installs through coreos-installer but must not be conflated with
+	// plain FCOS, which would skip the rebase and leave stock CoreOS behind.
+	if fcos.called {
+		t.Error("FCOS installer should not be called for a uCore target")
+	}
+	if flatcar.called {
+		t.Error("Flatcar installer should not be called")
+	}
+}
+
+func TestDispatchingInstaller_NilUcore(t *testing.T) {
+	d := &install.DispatchingInstaller{Flatcar: &stubInstaller{}}
+	cfg := &model.InstallConfig{OS: model.OSUcore}
+	if err := d.Install(context.Background(), cfg, func(string) {}); err == nil {
+		t.Fatal("expected error when uCore installer is nil")
+	}
+}
+
+func TestDispatchingInstaller_NilUcoreDryRun(t *testing.T) {
+	d := &install.DispatchingInstaller{Flatcar: &stubInstaller{}}
+	cfg := &model.InstallConfig{OS: model.OSUcore, DryRun: true}
+	if err := d.Install(context.Background(), cfg, func(string) {}); err != nil {
+		t.Fatalf("unexpected error in dry-run with nil uCore installer: %v", err)
+	}
+}
+
 func TestDispatchingInstaller_UnsupportedOS(t *testing.T) {
 	d := &install.DispatchingInstaller{
 		Flatcar: &stubInstaller{},

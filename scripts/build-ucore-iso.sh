@@ -1,23 +1,34 @@
 #!/usr/bin/env bash
-# Build a bootable FCOS live ISO containing the knuckle installer.
+# Build a bootable installer ISO that installs uCore (https://github.com/ublue-os/ucore).
 #
-# Uses coreos-installer to:
-#  1. Download the FCOS live ISO for the target stream + architecture
-#  2. Customise the live image: inject the knuckle binary (as a base64 Ignition
-#     file) and enable the knuckle-installer systemd service via --live-ignition
+# # Why the live medium is Fedora CoreOS and not uCore
 #
-# The resulting ISO boots directly into a live FCOS environment where knuckle
-# runs on tty1.  The Conflicts=getty@tty1.service directive in the service unit
-# prevents the default FCOS autologin getty from competing with the TUI.
+# uCore publishes no ISO. Its GitHub releases carry changelogs only — the
+# "assets" array is empty on every release — and the images themselves are OCI
+# artifacts on ghcr.io. The project states that it "does not provide its own
+# custom or GUI installer". uCore is a bootc image that *extends* Fedora
+# CoreOS, so the live installer medium is the stock FCOS live ISO that uCore
+# already builds on.
 #
-# The shared implementation lives in scripts/lib/coreos-iso.sh, which is also
-# used by scripts/build-ucore-iso.sh.
+# That is not a limitation of this script; it is how uCore is meant to be
+# installed. Selecting uCore in the wizard makes knuckle:
+#   1. run coreos-installer to lay down a Fedora CoreOS deployment on the target
+#      disk (using the base stream derived from the chosen uCore stream), and
+#   2. write an Ignition oneshot unit that rebases that deployment onto the
+#      selected uCore OCI image on the installed system's first boot.
+#
+# The target therefore becomes uCore; the live environment the user interacts
+# with is Fedora CoreOS.
 #
 # Requirements: coreos-installer, python3
 #   Install (Fedora): sudo dnf install -y coreos-installer   (or: just tools-fcos)
 #   Non-Fedora: run the digest-pinned quay.io/coreos/coreos-installer:release container
 #
-# Usage: ./scripts/build-fcos-iso.sh [--stream stable|testing|next] [--arch amd64|arm64] [--binary /path/to/knuckle] [--ssh-key "ssh-ed25519 ..."]
+# Usage: ./scripts/build-ucore-iso.sh [--stream stable|testing|next] [--arch amd64|arm64] [--binary /path/to/knuckle] [--ssh-key "ssh-ed25519 ..."]
+#
+# Note: --stream selects the *Fedora CoreOS base* stream that coreos-installer
+# lays down. The uCore release stream (stable/testing/lts) and image variant are
+# chosen interactively in the wizard, or via headless config.
 set -euo pipefail
 
 STREAM="stable"
@@ -54,7 +65,7 @@ esac
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-BUILD_DIR="$ROOT_DIR/.fcos-iso-build"
+BUILD_DIR="$ROOT_DIR/.ucore-iso-build"
 OUTPUT_DIR="$ROOT_DIR/output"
 
 # Source before calling anything from it — the dependency check below is defined
@@ -65,10 +76,14 @@ source "$SCRIPT_DIR/lib/coreos-iso.sh"
 
 require_coreos_installer
 
+echo "note: the live medium is the Fedora CoreOS live ISO; uCore is installed"
+echo "      onto the target disk and applied by a first-boot rebase."
+echo ""
+
 # A custom base ISO (e.g. one built with coreos-assembler that carries wireless
 # firmware and nmtui) is used instead of downloading the stock FCOS ISO.
 if [[ -n "$BASE_ISO" ]]; then
     export KNUCKLE_BASE_ISO="$BASE_ISO"
 fi
 
-build_coreos_iso "fcos" "$STREAM" "$ARCH" "$BINARY_OVERRIDE" "$SSH_PUB_KEY"
+build_coreos_iso "ucore" "$STREAM" "$ARCH" "$BINARY_OVERRIDE" "$SSH_PUB_KEY"

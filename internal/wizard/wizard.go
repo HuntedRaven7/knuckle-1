@@ -82,6 +82,18 @@ type Wizard struct {
 	Prober    probe.Prober
 	Bakery    bakery.Client
 	Installer install.Installer
+	// ListWifiProfiles reads the NetworkManager keyfiles nmtui left behind.
+	// Defaults to probe.ListWifiProfiles; tests substitute a fixture reader.
+	ListWifiProfiles WifiProfileLister
+	// WifiPreflightFn reports the live environment's WiFi capability.
+	// Defaults to the real probe; tests substitute a fixed result.
+	WifiPreflightFn func() WifiPreflight
+
+	// wifiPreflight caches the live environment's WiFi capability. Neither the
+	// live image's package set nor the set of wireless adapters changes while
+	// the installer runs, so it is probed once.
+	wifiPreflight     WifiPreflight
+	wifiPreflightDone bool
 }
 
 // New creates a new Wizard with the given dependencies
@@ -101,9 +113,10 @@ func New(prober probe.Prober, bakeryClient bakery.Client, installer install.Inst
 				Swap: model.SwapConfig{Enabled: true, SizeMB: 0},
 			},
 		},
-		Prober:    prober,
-		Bakery:    bakeryClient,
-		Installer: installer,
+		Prober:           prober,
+		Bakery:           bakeryClient,
+		Installer:        installer,
+		ListWifiProfiles: probe.ListWifiProfiles,
 	}
 }
 
@@ -115,15 +128,19 @@ func (w *Wizard) Next() error {
 
 	if w.State.CurrentStep < model.StepDone {
 		w.State.CurrentStep++
-		// BluefinDDI skips Sysext, Nvidia, Tailscale, and Update steps —
-		// those are all Flatcar/FCOS-only concerns.
-		if w.isBluefinDDI() {
+		// BluefinDDI and uCore skip Sysext, Nvidia, Tailscale, and Update
+		// steps — those are all Flatcar-only concerns.
+		if w.skipsFlatcarExtras() {
 			for w.State.CurrentStep == model.StepSysext ||
 				w.State.CurrentStep == model.StepNvidia ||
 				w.State.CurrentStep == model.StepTailscale ||
 				w.State.CurrentStep == model.StepUpdate {
 				w.State.CurrentStep++
 			}
+		}
+		// StepUcore is conditional — only visit it for a uCore target.
+		if w.State.CurrentStep == model.StepUcore && !w.isUcore() {
+			w.State.CurrentStep++
 		}
 		// StepNvidia is conditional — only visit it when nvidia-runtime is selected.
 		if w.State.CurrentStep == model.StepNvidia && !w.isNvidiaSelected() {
@@ -141,14 +158,18 @@ func (w *Wizard) Next() error {
 func (w *Wizard) Previous() {
 	if w.State.CurrentStep > model.StepWelcome {
 		w.State.CurrentStep--
-		// BluefinDDI: skip back over Sysext/Nvidia/Tailscale/Update.
-		if w.isBluefinDDI() {
+		// BluefinDDI and uCore: skip back over Sysext/Nvidia/Tailscale/Update.
+		if w.skipsFlatcarExtras() {
 			for w.State.CurrentStep == model.StepUpdate ||
 				w.State.CurrentStep == model.StepTailscale ||
 				w.State.CurrentStep == model.StepNvidia ||
 				w.State.CurrentStep == model.StepSysext {
 				w.State.CurrentStep--
 			}
+		}
+		// StepUcore is conditional — skip back over it for non-uCore targets.
+		if w.State.CurrentStep == model.StepUcore && !w.isUcore() {
+			w.State.CurrentStep--
 		}
 		// StepTailscale is conditional — skip back over it when tailscale is not selected.
 		if w.State.CurrentStep == model.StepTailscale && !w.isTailscaleSelected() {
@@ -168,11 +189,29 @@ func (w *Wizard) isBluefinDDI() bool {
 	return w.State.Config.OS == model.OSBluefinDDI
 }
 
+// isUcore returns true when the target OS is uCore, the ublue-os OCI
+// derivative of Fedora CoreOS.
+func (w *Wizard) isUcore() bool {
+	return w.State.Config.OS == model.OSUcore
+}
+
+// skipsFlatcarExtras reports whether the target OS bypasses the steps that only
+// make sense for Flatcar: Sysext, GPU Setup, Tailscale, and Update Strategy.
+//
+// Bluefin DDI and uCore both qualify, for different reasons. Bluefin DDI is a
+// systemd DDI image installer with no Ignition at all. uCore runs a Fedora
+// kernel, so Flatcar bakery sysexts will not load, and it updates through
+// rpm-ostreed rather than the update-engine/zincati pair those steps configure.
+func (w *Wizard) skipsFlatcarExtras() bool {
+	return w.isBluefinDDI() || w.isUcore()
+}
+
 // isNvidiaSelected returns true when the nvidia-runtime sysext is toggled on.
-// FCOS and BluefinDDI do not use /etc/flatcar/enabled-sysext.conf, so the
-// NVIDIA step is unconditionally skipped for those OS targets.
+// FCOS, uCore and BluefinDDI do not use /etc/flatcar/enabled-sysext.conf, so
+// the NVIDIA step is unconditionally skipped for those OS targets. uCore
+// carries its driver in the image tag instead (see model.UcoreConfig.Nvidia).
 func (w *Wizard) isNvidiaSelected() bool {
-	if w.State.Config.OS == model.OSFCOS || w.isBluefinDDI() {
+	if model.IsCoreOSDerivative(w.State.Config.OS) || w.isBluefinDDI() {
 		return false
 	}
 	for _, s := range w.State.Sysexts {
@@ -196,6 +235,10 @@ func (w *Wizard) isTailscaleSelected() bool {
 // GoToStep jumps to a specific step (for review screen navigation)
 func (w *Wizard) GoToStep(step model.WizardStep) {
 	if step >= model.StepWelcome && step <= model.StepDone {
+		// StepUcore is conditional — refuse jump for non-uCore targets.
+		if step == model.StepUcore && !w.isUcore() {
+			return
+		}
 		// StepNvidia is conditional — refuse jump when nvidia-runtime not selected.
 		if step == model.StepNvidia && !w.isNvidiaSelected() {
 			return
@@ -213,8 +256,14 @@ func (w *Wizard) ValidateCurrentStep() error {
 	switch w.State.CurrentStep {
 	case model.StepWelcome:
 		return w.validateWelcome()
+	case model.StepUcore:
+		return w.validateUcore()
 	case model.StepNetwork:
 		return w.validateNetwork()
+	case model.StepWifi:
+		// Optional: skipping is a valid outcome, so there is nothing to reject.
+		// The captured profiles are validated when the Ignition is generated.
+		return nil
 	case model.StepStorage:
 		return w.validateStorage()
 	case model.StepUser:
@@ -241,7 +290,13 @@ func (w *Wizard) validateWelcome() error {
 	if w.isBluefinDDI() {
 		return nil
 	}
-	if w.State.Config.OS == model.OSFCOS {
+	if w.isUcore() {
+		// uCore's release stream is its own vocabulary and lives in
+		// Ucore.Stream; Config.Channel is not used for this target.
+		if err := validate.UcoreStream(w.State.Config.Ucore.WithDefaults().Stream); err != nil {
+			return err
+		}
+	} else if w.State.Config.OS == model.OSFCOS {
 		if err := validate.FCOSStream(w.State.Config.Channel); err != nil {
 			return err
 		}
@@ -256,6 +311,23 @@ func (w *Wizard) validateWelcome() error {
 		}
 	}
 	return nil
+}
+
+// validateUcore checks the uCore image selection. Every field is normalised
+// first so a partially-filled form defaults rather than being rejected — the
+// wizard writes a zero value for a select the user never touched.
+func (w *Wizard) validateUcore() error {
+	uc := w.State.Config.Ucore.WithDefaults()
+	if err := validate.UcoreStream(uc.Stream); err != nil {
+		return err
+	}
+	if err := validate.UcoreImage(uc.Image); err != nil {
+		return err
+	}
+	if err := validate.UcoreNvidia(uc.Nvidia); err != nil {
+		return err
+	}
+	return validate.UcoreVerifyMode(uc.Verify)
 }
 
 func (w *Wizard) validateNetwork() error {
@@ -405,11 +477,13 @@ func (w *Wizard) runSystemChecks() {
 }
 
 // FetchSysexts loads the sysext catalog for the configured architecture.
-// For FCOS and BluefinDDI, sysexts are not applicable — the step is skipped.
+// For FCOS, uCore and BluefinDDI, sysexts are not applicable — the step is skipped.
 func (w *Wizard) FetchSysexts(ctx context.Context) error {
-	if w.State.Config.OS == model.OSFCOS || w.isBluefinDDI() {
-		// FCOS sysext catalog support requires #641 (FetchCatalogFCOS).
-		// For now, leave Sysexts empty so the step is a no-op for FCOS.
+	if model.IsCoreOSDerivative(w.State.Config.OS) || w.isBluefinDDI() {
+		// The bakery serves Flatcar sysexts, built against Flatcar kernels.
+		// On a Fedora kernel (FCOS, uCore) they will not load, so leaving
+		// Sysexts empty makes the step a no-op instead of offering extensions
+		// that would silently fail on the installed system.
 		w.State.Sysexts = nil
 		return nil
 	}

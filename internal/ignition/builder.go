@@ -31,6 +31,7 @@ type Builder struct {
 	// order the YAML keys appear in a Butane document.
 	storageFiles    []string // YAML fragments under storage.files
 	storageLinks    []string // YAML fragments under storage.links
+	storageDirs     []string // YAML fragments under storage.directories
 	systemdUnits    []string // YAML fragments under systemd.units
 	passwdUsersYAML string   // entire passwd.users block (mutually exclusive contents)
 }
@@ -52,6 +53,13 @@ func (b *Builder) AddStorageLink(fragment string) {
 	b.storageLinks = append(b.storageLinks, fragment)
 }
 
+// AddStorageDirectory appends a YAML fragment that will be placed under
+// `storage.directories`. Directories are ordered before files and links so a
+// file can be written into a directory the same Ignition run creates.
+func (b *Builder) AddStorageDirectory(fragment string) {
+	b.storageDirs = append(b.storageDirs, fragment)
+}
+
 // AddSystemdUnit appends a YAML fragment placed under `systemd.units`.
 func (b *Builder) AddSystemdUnit(fragment string) {
 	b.systemdUnits = append(b.systemdUnits, fragment)
@@ -69,8 +77,14 @@ func (b *Builder) BuildWithVariant(header string) string {
 	var doc strings.Builder
 	doc.WriteString(header)
 
-	if len(b.storageFiles) > 0 || len(b.storageLinks) > 0 {
+	if len(b.storageFiles) > 0 || len(b.storageLinks) > 0 || len(b.storageDirs) > 0 {
 		doc.WriteString("storage:\n")
+		if len(b.storageDirs) > 0 {
+			doc.WriteString("  directories:\n")
+			for _, d := range b.storageDirs {
+				doc.WriteString(indentFragment(d, 4))
+			}
+		}
 		if len(b.storageFiles) > 0 {
 			doc.WriteString("  files:\n")
 			for _, f := range b.storageFiles {
@@ -153,4 +167,7 @@ var builderFuncMap = template.FuncMap{
 		s = strings.ReplaceAll(s, "\t", `\t`)
 		return s
 	},
+	// indentBlock prefixes every non-empty line with n spaces, so multi-line
+	// content can be placed inside a YAML block scalar without ending it early.
+	"indentBlock": func(n int, s string) string { return indentBlock(n, s) },
 }

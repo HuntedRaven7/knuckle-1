@@ -22,6 +22,24 @@ func (m *Model) initForm() {
 	switch m.Wizard.State.CurrentStep {
 	case model.StepWelcome:
 		m.activeForm = nil // Custom card-based channel selector
+	case model.StepUcore:
+		uc := m.Wizard.State.Config.Ucore.WithDefaults()
+		m.ucoreImageIn = uc.Image
+		m.ucoreStreamIn = uc.Stream
+		m.ucoreNvidiaIn = uc.Nvidia
+		m.ucoreVerifyIn = uc.Verify
+		m.activeForm = m.buildUcoreForm()
+	case model.StepWifi:
+		// Only a form while the user has asked to type a network in; otherwise
+		// the step renders its own view with the nmtui prompts.
+		if m.wifiManual {
+			m.wifiSSIDIn = ""
+			m.wifiPSKIn = ""
+			m.wifiSecurityIn = "psk"
+			m.activeForm = m.buildWifiManualForm()
+		} else {
+			m.activeForm = nil
+		}
 	case model.StepNetwork:
 		m.dnsInput = strings.Join(m.Wizard.State.Config.Network.DNS, ",")
 		if m.networkModeInput == "" {
@@ -81,6 +99,35 @@ func (m *Model) onFormComplete() tea.Cmd {
 			m.initForm()
 			return nil
 		}
+
+	case model.StepUcore:
+		// Normalise before validating: a huh.Select always yields a value, but
+		// an empty one would otherwise be rejected rather than defaulted.
+		// Commit only after validation, so a rejected selection never reaches
+		// the config the installer would later read.
+		selection := model.UcoreConfig{
+			Image:  m.ucoreImageIn,
+			Stream: m.ucoreStreamIn,
+			Nvidia: m.ucoreNvidiaIn,
+			Verify: m.ucoreVerifyIn,
+		}.WithDefaults()
+		prev := cfg.Ucore
+		cfg.Ucore = selection
+		if err := m.Wizard.ValidateCurrentStep(); err != nil {
+			cfg.Ucore = prev
+			m.err = err
+			m.initForm()
+			return m.activeForm.Init()
+		}
+
+	case model.StepWifi:
+		// The manual form is the only form on this step; it commits and leaves.
+		if !m.commitWifiManual() {
+			return m.activeForm.Init()
+		}
+		m.wifiManual = false
+		m.activeForm = nil
+		return m.advanceFromWifi()
 
 	case model.StepNetwork:
 		m.Wizard.ApplyNetworkStep(wizard.NetworkStepInput{

@@ -68,6 +68,26 @@ type Model struct {
 	tailscaleRoutesIn  string
 	showAdvanced       bool
 
+	// uCore image selection (StepUcore form). Seeded from and committed back
+	// to Wizard.State.Config.Ucore; the "In" suffix marks raw form state.
+	ucoreImageIn  string
+	ucoreStreamIn string
+	ucoreNvidiaIn string
+	ucoreVerifyIn string
+
+	// wifiRunning is true while nmtui owns the terminal. It suppresses further
+	// key handling in the TUI, which is suspended at that point anyway, and
+	// drives the "nmtui is running" line in the view.
+	wifiRunning bool
+
+	// wifiManual is true while the hand-entered WiFi form is showing instead of
+	// the step's own view.
+	wifiManual bool
+	// wifiSSIDIn, wifiPSKIn and wifiSecurityIn back the manual form.
+	wifiSSIDIn     string
+	wifiPSKIn      string
+	wifiSecurityIn string
+
 	// osSubView tracks whether the StepWelcome OS picker is shown (true)
 	// or the channel/stream card picker is shown (false).
 	osSubView bool
@@ -175,6 +195,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		done := float64(len(m.Wizard.State.ProgressMessages))
 		pCmd := m.progress.SetPercent(done / total)
 		return m, tea.Batch(pCmd, m.waitForProgress())
+	case wifiFinishedMsg:
+		return m.finishWifi(msg)
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
@@ -286,6 +308,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// The WiFi step owns only these keys. Everything else — q, esc, ctrl+c —
+	// falls through to the global handlers below so quit and back-navigation
+	// keep working while nmtui is being offered.
+	if m.Wizard.State.CurrentStep == model.StepWifi && wifiStepOwnsKey(msg.String()) {
+		return m.handleWifiKey(msg)
+	}
+
 	// Only allow 'q' to quit when NOT editing text fields
 	switch msg.String() {
 	case "ctrl+c":
@@ -497,7 +526,13 @@ func (m *Model) handleEnter() (tea.Model, tea.Cmd) {
 		// Apply channel/stream selection from card cursor
 		channels := m.channelList()
 		if m.cursor >= 0 && m.cursor < len(channels) {
-			m.Wizard.State.Config.Channel = channels[m.cursor]
+			// uCore carries its stream in Ucore.Stream, not Channel: its
+			// vocabulary is its own and Channel is unused for that target.
+			if m.Wizard.State.Config.OS == model.OSUcore {
+				m.Wizard.State.Config.Ucore.Stream = channels[m.cursor]
+			} else {
+				m.Wizard.State.Config.Channel = channels[m.cursor]
+			}
 		}
 		// If IgnitionURL is set, skip directly to Storage
 		if m.Wizard.State.Config.IgnitionURL != "" {
@@ -655,16 +690,23 @@ func (m *Model) applyFields() {
 			case "channel":
 				if f.value != "" {
 					var chanErr error
-					if cfg.OS == model.OSFCOS {
+					switch cfg.OS {
+					case model.OSFCOS:
 						chanErr = validate.FCOSStream(f.value)
-					} else {
+					case model.OSUcore:
+						chanErr = validate.UcoreStream(f.value)
+					default:
 						chanErr = validate.Channel(f.value)
 					}
 					if chanErr != nil {
 						m.err = chanErr
 						return
 					}
-					cfg.Channel = f.value
+					if cfg.OS == model.OSUcore {
+						cfg.Ucore.Stream = f.value
+					} else {
+						cfg.Channel = f.value
+					}
 				}
 			case "version":
 				cfg.Version = f.value
@@ -833,6 +875,8 @@ func (m *Model) render() string {
 		b.WriteString(m.viewChannelCards())
 	case model.StepStorage:
 		b.WriteString(m.viewStorage())
+	case model.StepWifi:
+		b.WriteString(m.viewWifi())
 	case model.StepSysext:
 		b.WriteString(m.viewSysext())
 	case model.StepNvidia:
@@ -1264,6 +1308,8 @@ func (m *Model) viewInstall() string {
 	switch m.Wizard.State.Config.OS {
 	case model.OSFCOS:
 		osName = "Fedora CoreOS"
+	case model.OSUcore:
+		osName = "uCore"
 	case model.OSBluefinDDI:
 		osName = "Bluefin Server"
 	default:
@@ -1302,6 +1348,8 @@ func (m *Model) viewDone() string {
 	switch cfg.OS {
 	case model.OSFCOS:
 		osName = "Fedora CoreOS"
+	case model.OSUcore:
+		osName = "uCore"
 	case model.OSBluefinDDI:
 		osName = "Bluefin Server"
 	default:
@@ -1314,11 +1362,29 @@ func (m *Model) viewDone() string {
 	} else if cfg.Disk.DevPath != "" {
 		fmt.Fprintf(&b, "  Disk:     %s\n", cfg.Disk.DevPath)
 	}
-	if cfg.OS != model.OSBluefinDDI && cfg.Channel != "" {
-		fmt.Fprintf(&b, "  Channel:  %s\n", cfg.Channel)
+	// ReleaseLabel picks the right vocabulary per OS: uCore's stream lives in
+	// Ucore.Stream, so printing Channel would show a stale Flatcar value.
+	if cfg.OS != model.OSBluefinDDI && cfg.ReleaseLabel() != "" {
+		fmt.Fprintf(&b, "  Channel:  %s\n", cfg.ReleaseLabel())
+	}
+
+	// uCore is finished at this point only in the sense that CoreOS is on disk.
+	// The installed system still has to reboot once to rebase onto the uCore
+	// image, which is not something the user would otherwise expect.
+	if cfg.OS == model.OSUcore {
+		uc := cfg.Ucore.WithDefaults()
+		accent := lipgloss.NewStyle().Foreground(lipgloss.Color("75"))
+		dimDone := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+		b.WriteString("\n")
+		b.WriteString(accent.Render("  One more reboot is required.") + "\n")
+		b.WriteString(dimDone.Render("    On first boot this system rebases onto:") + "\n")
+		b.WriteString(dimDone.Render("      "+uc.ImageReference()) + "\n")
 	}
 	if cfg.Hostname != "" {
 		fmt.Fprintf(&b, "  Hostname: %s\n", cfg.Hostname)
+	}
+	if wifiHasProfiles(cfg) {
+		fmt.Fprintf(&b, "  WiFi:     %s\n", strings.Join(cfg.Wifi.SSIDs(), ", "))
 	}
 	if len(cfg.Users) > 0 && cfg.Users[0].Username != "" {
 		fmt.Fprintf(&b, "  User:     %s\n", cfg.Users[0].Username)
@@ -1341,6 +1407,9 @@ func (m *Model) viewDone() string {
 	case model.OSFCOS:
 		b.WriteString("  " + link.Render("https://discussion.fedoraproject.org/tag/coreos") + dim.Render("  — Fedora CoreOS community") + "\n")
 		b.WriteString("  " + link.Render("https://docs.fedoraproject.org/en-US/fedora-coreos/") + dim.Render("  — Fedora CoreOS documentation") + "\n")
+	case model.OSUcore:
+		b.WriteString("  " + link.Render("https://github.com/ublue-os/ucore") + dim.Render("  — uCore project") + "\n")
+		b.WriteString("  " + link.Render("https://universal-blue.org/") + dim.Render("  — Universal Blue community") + "\n")
 	case model.OSBluefinDDI:
 		b.WriteString("  " + link.Render("https://projectbluefin.io") + dim.Render("  — Bluefin project") + "\n")
 		b.WriteString("  " + link.Render("https://discord.gg/projectbluefin") + dim.Render("  — Bluefin community on Discord") + "\n")

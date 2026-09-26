@@ -7,11 +7,12 @@ import (
 	"github.com/projectbluefin/knuckle/internal/model"
 )
 
-// DispatchingInstaller delegates to FlatcarInstaller, FCOSInstaller, or
-// BluefinDDIInstaller based on cfg.OS at Install() call time.
+// DispatchingInstaller delegates to FlatcarInstaller, FCOSInstaller,
+// UcoreInstaller, or BluefinDDIInstaller based on cfg.OS at Install() call time.
 type DispatchingInstaller struct {
 	Flatcar    Installer
 	FCOS       Installer
+	Ucore      Installer
 	BluefinDDI Installer
 }
 
@@ -25,6 +26,14 @@ func (d *DispatchingInstaller) Install(ctx context.Context, cfg *model.InstallCo
 			return fmt.Errorf("fcos installer not configured")
 		}
 		return d.FCOS.Install(ctx, cfg, progress)
+	case model.OSUcore:
+		if d.Ucore == nil {
+			if cfg.DryRun {
+				return nil
+			}
+			return fmt.Errorf("ucore installer not configured")
+		}
+		return d.Ucore.Install(ctx, cfg, progress)
 	case model.OSBluefinDDI:
 		if d.BluefinDDI == nil {
 			if cfg.DryRun {

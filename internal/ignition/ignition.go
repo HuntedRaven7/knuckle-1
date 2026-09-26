@@ -45,18 +45,15 @@ func (g *Generator) GenerateButane(cfg *model.InstallConfig) (string, error) {
 		return "", fmt.Errorf("config cannot be nil")
 	}
 
-	funcMap := template.FuncMap{
-		"isStatic": func(n model.NetworkConfig) bool {
-			return n.Mode == model.NetworkStatic
-		},
-		"yamlEscape": func(s string) string {
-			s = strings.ReplaceAll(s, `\`, `\\`)
-			s = strings.ReplaceAll(s, `"`, `\"`)
-			s = strings.ReplaceAll(s, "\n", `\n`)
-			s = strings.ReplaceAll(s, "\r", `\r`)
-			s = strings.ReplaceAll(s, "\t", `\t`)
-			return s
-		},
+	// Start from builderFuncMap so YAML escaping and block indentation have a
+	// single definition shared with the Builder-based generators, then add the
+	// one helper specific to the legacy template.
+	funcMap := template.FuncMap{}
+	for name, fn := range builderFuncMap {
+		funcMap[name] = fn
+	}
+	funcMap["isStatic"] = func(n model.NetworkConfig) bool {
+		return n.Mode == model.NetworkStatic
 	}
 
 	tmpl, err := template.New("butane").Funcs(funcMap).Parse(butaneTemplate)
@@ -96,6 +93,11 @@ func (g *Generator) GenerateButane(cfg *model.InstallConfig) (string, error) {
 
 	tailscaleEnabled := hasTailscaleConfig(cfg.Tailscale)
 
+	wifiProfiles, err := renderWifiProfiles(cfg)
+	if err != nil {
+		return "", fmt.Errorf("rendering wifi profiles: %w", err)
+	}
+
 	data := templateData{
 		Hostname:            cfg.Hostname,
 		Timezone:            cfg.Timezone,
@@ -113,6 +115,7 @@ func (g *Generator) GenerateButane(cfg *model.InstallConfig) (string, error) {
 		TailscaleEnabled:    tailscaleEnabled,
 		TailscaleForwarding: tailscaleEnabled && (cfg.Tailscale.Mode == model.TailscaleModeExitNode || cfg.Tailscale.Mode == model.TailscaleModeSubnetRouter),
 		TailscaleExtraArgs:  tailscaleExtraArgs(cfg.Tailscale),
+		WifiProfiles:        wifiProfiles,
 	}
 
 	var buf bytes.Buffer
@@ -140,6 +143,19 @@ type templateData struct {
 	TailscaleEnabled    bool   // AuthKey is set, i.e. user filled the step
 	TailscaleForwarding bool   // exit-node or subnet-router → need sysctl ip_forward=1
 	TailscaleExtraArgs  string // value of TS_EXTRA_ARGS in tailscale.env
+	// WifiProfiles are pre-rendered NetworkManager keyfile entries, already
+	// validated and indented. Empty when the WiFi step was skipped.
+	WifiProfiles []renderedWifiProfile
+}
+
+// renderedWifiProfile is one NetworkManager keyfile prepared for embedding.
+//
+// It is pre-rendered rather than passing model.WifiProfile into the template so
+// that filename validation and block-scalar indentation happen once, in
+// addWifiProfiles, instead of being duplicated inside a template expression.
+type renderedWifiProfile struct {
+	Filename string
+	Body     string
 }
 
 func hasTailscaleConfig(ts model.TailscaleConfig) bool {
@@ -209,6 +225,9 @@ func (g *Generator) GenerateFCOSButane(cfg *model.InstallConfig) (string, error)
 
 	addSwapUnits(b, cfg)
 	addTailscaleUnits(b, cfg)
+	if err := addWifiProfiles(b, cfg); err != nil {
+		return "", err
+	}
 
 	return b.BuildFCOS(), nil
 }
@@ -575,6 +594,14 @@ storage:
           net.ipv4.ip_forward = 1
           net.ipv6.conf.all.forwarding = 1
 {{- end}}
+{{- end}}
+{{- range .WifiProfiles}}
+    - path: ` + WifiTargetDir + `/{{.Filename}}
+      mode: 0600
+      overwrite: true
+      contents:
+        inline: |
+{{.Body | indentBlock 10}}
 {{- end}}
 {{- if .Timezone}}
   links:

@@ -251,7 +251,9 @@ func TestMaxCursor_AllSteps(t *testing.T) {
 		disks  int
 		expect int
 	}{
-		{model.StepWelcome, 0, 3}, // 3 OS choices (Flatcar | FCOS | Bluefin Server) in OS picker
+		// Derived from the roster so adding an OS target cannot desync the
+		// cursor ceiling from the cards the picker renders.
+		{model.StepWelcome, 0, len(model.OSTargetIDs())},
 		{model.StepStorage, 3, 3}, // number of disks
 		{model.StepStorage, 0, 0}, // no disks
 		{model.StepSysext, 0, 0},  // empty sysexts
@@ -290,13 +292,29 @@ func TestMaxCursor_SysextWithEntries(t *testing.T) {
 
 // --- handleEnter: BluefinDDI OS picker ---
 
+// indexOfOSTarget returns the picker's cursor index for an OS id, failing the
+// test if the id is not in the roster. Tests that drive the OS picker should use
+// this rather than a literal index so a roster reorder cannot quietly change
+// which OS they exercise.
+func indexOfOSTarget(t *testing.T, id string) int {
+	t.Helper()
+	for i, got := range model.OSTargetIDs() {
+		if got == id {
+			return i
+		}
+	}
+	t.Fatalf("OS %q is not in the roster", id)
+	return -1
+}
+
 func TestHandleEnter_Welcome_BluefinDDI_SkipsToStorage(t *testing.T) {
 	w := newTestWizard()
 	w.State.CurrentStep = model.StepWelcome
 
 	m := New(w)
-	// cursor 2 = Bluefin Server in the 3-option OS picker
-	m.cursor = 2
+	// Look the entry up by ID rather than hardcoding a cursor index, so
+	// reordering the roster cannot silently retarget this test.
+	m.cursor = indexOfOSTarget(t, model.OSBluefinDDI)
 	_, _ = m.handleEnter()
 
 	// BluefinDDI selection should skip channel picker and go straight to Storage

@@ -28,6 +28,10 @@ default:
     @echo "  just build-fcos-iso      — build FCOS live ISO (stable, amd64)"
     @echo "  just build-fcos-iso arch=arm64 stream=testing"
     @echo ""
+    @echo "uCore (ublue-os):"
+    @echo "  just build-ucore-iso     — build a uCore installer ISO"
+    @echo "  just build-ucore-iso arch=arm64 stream=testing"
+    @echo ""
     @echo "Pre-release (requires network):"
     @echo "  just catalog-check       — report new bakery extensions missing descriptions"
     @echo "  just nvidia-check        — verify NVIDIA driver series vs Flatcar docs"
@@ -228,6 +232,44 @@ headless-test:
     EOF
     bin/knuckle --config /tmp/knuckle-fcos-test-config.json --headless --dry-run
     echo "✅ FCOS PASS"
+
+    echo ""
+    echo "── uCore headless dry-run ──"
+    # Minimal config: every ucore field is optional and defaults to the full
+    # image on the stable stream.
+    cat > /tmp/knuckle-ucore-test-config.json <<'EOF'
+    {"os":"ucore","hostname":"ucore-test","timezone":"UTC","network":{"mode":"dhcp"},"users":[{"username":"core","ssh_keys":["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGdllynsgXbmcFXhVJAIAkDbYjqZ2OgHgZJVFmFKtvF7 test"]}],"disk":"/dev/vdb","update_strategy":"off","reboot":false}
+    EOF
+    bin/knuckle --config /tmp/knuckle-ucore-test-config.json --headless --dry-run
+    echo "✅ uCore (defaults) PASS"
+
+    # Explicit image/variant selection, including an LTS base and NVIDIA LTS.
+    cat > /tmp/knuckle-ucore-minimal-test-config.json <<'EOF'
+    {"os":"ucore","ucore":{"image":"ucore-minimal","stream":"lts","nvidia":"nvidia-lts","verify":"unverified"},"hostname":"ucore-min","timezone":"UTC","network":{"mode":"dhcp"},"users":[{"username":"core","ssh_keys":["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGdllynsgXbmcFXhVJAIAkDbYjqZ2OgHgZJVFmFKtvF7 test"]}],"disk":"/dev/vdb","update_strategy":"off","reboot":false}
+    EOF
+    bin/knuckle --config /tmp/knuckle-ucore-minimal-test-config.json --headless --dry-run
+    echo "✅ uCore (minimal + nvidia-lts) PASS"
+
+    echo ""
+    echo "── WiFi headless dry-run ──"
+    # A NetworkManager keyfile supplied directly, since headless has no
+    # terminal for nmtui. Exercises filename validation and profile rendering.
+    cat > /tmp/knuckle-wifi-test-config.json <<'EOF'
+    {"os":"fcos","hostname":"wifi-node","timezone":"UTC","network":{"mode":"dhcp"},"users":[{"username":"core","ssh_keys":["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGdllynsgXbmcFXhVJAIAkDbYjqZ2OgHgZJVFmFKtvF7 test"]}],"disk":"/dev/vdb","wifi":{"profiles":[{"filename":"home.nmconnection","contents":"[connection]\nid=HomeWifi\ntype=wifi\n\n[wifi]\nssid=HomeWifi\nmode=infrastructure\n\n[wifi-security]\nkey-mgmt=wpa-psk\npsk=PLACEHOLDER_KEY\n"}]},"update_strategy":"off","reboot":false}
+    EOF
+    bin/knuckle --config /tmp/knuckle-wifi-test-config.json --headless --dry-run
+    echo "✅ WiFi PASS"
+
+    # A profile filename that could escape the keyfile directory must be
+    # rejected before anything is written.
+    cat > /tmp/knuckle-wifi-bad-test-config.json <<'EOF'
+    {"os":"fcos","hostname":"wifi-node","timezone":"UTC","network":{"mode":"dhcp"},"users":[{"username":"core","ssh_keys":["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGdllynsgXbmcFXhVJAIAkDbYjqZ2OgHgZJVFmFKtvF7 test"]}],"disk":"/dev/vdb","wifi":{"profiles":[{"filename":"../escape.nmconnection","contents":"x"}]}}
+    EOF
+    if bin/knuckle --config /tmp/knuckle-wifi-bad-test-config.json --headless --dry-run >/dev/null 2>&1; then
+        echo "❌ WiFi traversal filename was accepted"
+        exit 1
+    fi
+    echo "✅ WiFi traversal rejected"
 
 # Real install in a VM — auto-boots the installed system when knuckle exits
 vm:
@@ -881,6 +923,18 @@ tools-fcos:
 build-fcos-iso arch="amd64" stream="stable": check-fcos-tools
     ./scripts/build-fcos-iso.sh --arch {{arch}} --stream {{stream}}
 
+# Build a uCore installer ISO (requires coreos-installer — run: just tools-fcos)
+# Produces output/knuckle-ucore-installer-<stream>-<arch>.iso
+#
+# uCore ships no ISO of its own: the live medium is the stock FCOS live ISO, and
+# knuckle installs uCore onto the target disk by rebasing onto the uCore OCI
+# image on first boot. The uCore stream (stable/testing/lts) and image variant
+# are chosen in the wizard, or pinned via headless config.
+#
+# Override stream/arch: just build-ucore-iso arch="arm64" stream="testing"
+build-ucore-iso arch="amd64" stream="stable": check-fcos-tools
+    ./scripts/build-ucore-iso.sh --arch {{arch}} --stream {{stream}}
+
 # Boot ISO in QEMU with UEFI (Ctrl-a x to quit)
 # KNUCKLE_ARCH=arm64 just boot-iso  — boots arm64 ISO (requires qemu-system-aarch64)
 boot-iso:
@@ -1219,6 +1273,9 @@ shell-lint: _install-shellcheck
     {{SHELLCHECK}} --severity=warning \
       scripts/qa-test-pr.sh \
       scripts/build-iso.sh \
+      scripts/build-fcos-iso.sh \
+      scripts/build-ucore-iso.sh \
+      scripts/lib/coreos-iso.sh \
       scripts/lib/verify-flatcar.sh \
       scripts/lib/vm-kubevirt.sh \
       scripts/fix-ghost-otel-process-noise.sh \

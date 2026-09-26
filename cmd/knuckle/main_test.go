@@ -679,3 +679,27 @@ func TestMain_NonDemoStartupFetch(t *testing.T) {
 		t.Fatalf("expected success with noop startup + noop TUI, got %v\noutput: %s", err, out)
 	}
 }
+
+// TestInitialStepForOS pins where --os lands. Everything but uCore goes
+// straight to disk selection; uCore must stop at its image step, because
+// skipping it would silently install the default uCore variant with no way for
+// the user to notice.
+func TestInitialStepForOS(t *testing.T) {
+	tests := []struct {
+		os   string
+		want model.WizardStep
+	}{
+		{model.OSUcore, model.StepUcore},
+		{model.OSFlatcar, model.StepStorage},
+		{model.OSFCOS, model.StepStorage},
+		{model.OSBluefinDDI, model.StepStorage},
+		{"", model.StepStorage},
+		{"nixos", model.StepStorage},
+	}
+
+	for _, tt := range tests {
+		if got := initialStepForOS(tt.os); got != tt.want {
+			t.Errorf("initialStepForOS(%q) = %v, want %v", tt.os, got, tt.want)
+		}
+	}
+}

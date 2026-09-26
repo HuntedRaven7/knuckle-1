@@ -7,7 +7,9 @@ type WizardStep int
 
 const (
 	StepWelcome WizardStep = iota
+	StepUcore              // conditional: only visited when the target OS is uCore
 	StepNetwork
+	StepWifi // WiFi: offers nmtui; skippable, so always visited
 	StepStorage
 	StepUser
 	StepSysext
@@ -24,8 +26,12 @@ func (s WizardStep) String() string {
 	switch s {
 	case StepWelcome:
 		return "Welcome"
+	case StepUcore:
+		return "uCore Image"
 	case StepNetwork:
 		return "Network"
+	case StepWifi:
+		return "WiFi"
 	case StepStorage:
 		return "Storage"
 	case StepUser:
@@ -53,6 +59,7 @@ func (s WizardStep) String() string {
 const (
 	OSFlatcar    = "flatcar"
 	OSFCOS       = "fcos"
+	OSUcore      = "ucore"
 	OSBluefinDDI = "bluefin-ddi"
 )
 
@@ -89,6 +96,11 @@ var osTargets = []OSTarget{
 		Description: "Fedora's immutable, auto-updating container host. Based on rpm-ostree with Ignition provisioning.",
 	},
 	{
+		ID:          OSUcore,
+		Name:        "uCore",
+		Description: "ublue-os Fedora CoreOS derivative with cockpit, ZFS, Samba and tailscale. Rebases onto the uCore OCI image at first boot.",
+	},
+	{
 		ID:          OSBluefinDDI,
 		Name:        "Install Bluefin Server",
 		Description: "systemd-native DDI image installer. Partitions, provisions users, and installs the bootloader via systemd-repart.",
@@ -100,6 +112,28 @@ func OSTargets() []OSTarget {
 	out := make([]OSTarget, len(osTargets))
 	copy(out, osTargets)
 	return out
+}
+
+// OSDisplayName returns the human-readable name of an OS target, for use in
+// status and completion messages.
+//
+// This is deliberately not OSTargets().Name: the roster entry is the label
+// shown on a picker card ("Install Bluefin Server"), whereas these sentences
+// want the product name ("Bluefin Server"). The empty and unknown values fall
+// back to Flatcar, matching the OS field's own default.
+func OSDisplayName(os string) string {
+	switch os {
+	case OSFCOS:
+		return "Fedora CoreOS"
+	case OSUcore:
+		return "uCore"
+	case OSBluefinDDI:
+		return "Bluefin Server"
+	case OSFlatcar, "":
+		return "Flatcar Container Linux"
+	default:
+		return "Flatcar Container Linux"
+	}
 }
 
 // OSTargetIDs returns the roster's IDs in presentation order. A cursor into the
@@ -126,20 +160,28 @@ func IsKnownOS(id string) bool {
 
 // InstallConfig is the complete installation configuration built by the wizard.
 type InstallConfig struct {
-	OS                  string // "flatcar" | "fcos"; defaults to "flatcar" for backward compatibility
-	Arch                string // amd64 or arm64 (determined at ISO build time; default "amd64")
-	Channel             string // stable, beta, alpha, edge
-	Version             string // optional: pin to specific Flatcar version (flatcar-install -V)
-	Hostname            string
-	Timezone            string // e.g. "UTC", "America/New_York"
-	Network             NetworkConfig
-	Disk                DiskInfo
-	Users               []UserConfig
-	SSHKeys             []string // authorized_keys entries
-	Sysexts             []SysextEntry
+	// OS is the roster discriminator: OSFlatcar, OSFCOS, OSUcore or OSBluefinDDI.
+	// The empty string defaults to OSFlatcar for backward compatibility.
+	OS       string
+	Ucore    UcoreConfig // only consulted when OS == OSUcore; see ucore.go
+	Arch     string      // amd64 or arm64 (determined at ISO build time; default "amd64")
+	Channel  string      // Flatcar channel (stable, beta, alpha, lts, edge) or FCOS stream (stable, testing, next). Unused for OSUcore — see Ucore.Stream.
+	Version  string      // optional: pin to specific Flatcar version (flatcar-install -V)
+	Hostname string
+	Timezone string // e.g. "UTC", "America/New_York"
+	Network  NetworkConfig
+	Disk     DiskInfo
+	Users    []UserConfig
+	SSHKeys  []string // authorized_keys entries
+	Sysexts  []SysextEntry
+	// Wifi holds NetworkManager profiles captured by the WiFi step and copied
+	// to the target by the generated Ignition config. See wifi.go.
+	Wifi WifiConfig
+	// UpdateStrategy is Flatcar/Bluefin only. uCore manages its own updates
+	// through rpm-ostreed/bootc and never visits the Update Strategy step.
 	UpdateStrategy      UpdateStrategy
 	IgnitionURL         string // external ignition URL (mutually exclusive with local gen)
-	NvidiaDriverVersion string // Flatcar NVIDIA kernel driver series, e.g. "570-open". Empty = none.
+	NvidiaDriverVersion string // Flatcar NVIDIA kernel driver series, e.g. "570-open". Empty = none. uCore selects its driver via Ucore.Nvidia instead.
 	Swap                SwapConfig
 	Tailscale           TailscaleConfig
 	DryRun              bool

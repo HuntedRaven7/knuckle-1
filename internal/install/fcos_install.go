@@ -90,17 +90,27 @@ func (i *FCOSInstaller) Install(ctx context.Context, cfg *model.InstallConfig, p
 	return nil
 }
 
-// buildFCOSInstallArgs constructs the argument list for coreos-installer.
+// buildFCOSInstallArgs constructs the argument list for coreos-installer,
+// taking the stream from the config's channel.
 // The disk path is a positional argument that must come last.
 func buildFCOSInstallArgs(cfg *model.InstallConfig, ignitionPath string) []string {
-	diskPath := installDiskPath(cfg)
+	return buildCoreOSInstallArgs(cfg.Channel, cfg.IgnitionURL, ignitionPath, installDiskPath(cfg))
+}
+
+// buildCoreOSInstallArgs constructs the coreos-installer argument list.
+//
+// stream is passed explicitly rather than read from the config because the
+// stream a target needs is not always the config's Channel: uCore publishes its
+// own stream vocabulary and derives its Fedora CoreOS base stream from it, so
+// that base may differ from whatever Channel happens to hold.
+func buildCoreOSInstallArgs(stream, ignitionURL, ignitionPath, diskPath string) []string {
 	args := []string{
 		"install",
-		"--stream", cfg.Channel,
+		"--stream", stream,
 	}
 
-	if cfg.IgnitionURL != "" {
-		args = append(args, "--ignition-url", cfg.IgnitionURL)
+	if ignitionURL != "" {
+		args = append(args, "--ignition-url", ignitionURL)
 	} else if ignitionPath != "" {
 		args = append(args, "--ignition-file", ignitionPath)
 	}
@@ -114,6 +124,17 @@ func buildFCOSInstallArgs(cfg *model.InstallConfig, ignitionPath string) []strin
 // its path. Delegates to the package-level newIgnitionTempFile seam so tests
 // can inject failures.
 func (i *FCOSInstaller) writeIgnitionFile(ignitionJSON string) (string, error) {
+	return writeIgnitionTempFile(ignitionJSON, i.Logger)
+}
+
+// writeIgnitionTempFile writes an Ignition config to a 0600 temp file and
+// returns its path.
+//
+// Ignition configs carry SSH keys and password hashes, so a partial write must
+// never be left on disk: both the write and close failure paths remove the
+// file before returning. The file is created via newIgnitionTempFile (O_EXCL)
+// so a predictable name cannot be pre-created by another user.
+func writeIgnitionTempFile(ignitionJSON string, logger *slog.Logger) (string, error) {
 	f, err := newIgnitionTempFile()
 	if err != nil {
 		return "", fmt.Errorf("creating temp ignition file: %w", err)
@@ -131,7 +152,7 @@ func (i *FCOSInstaller) writeIgnitionFile(ignitionJSON string) (string, error) {
 		return "", fmt.Errorf("closing ignition file: %w", err)
 	}
 
-	i.Logger.Info("ignition file written", "path", path)
+	logger.Info("ignition file written", "path", path)
 	return path, nil
 }
 

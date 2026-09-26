@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"charm.land/huh/v2"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/projectbluefin/knuckle/internal/model"
 	"github.com/projectbluefin/knuckle/internal/validate"
+	"github.com/projectbluefin/knuckle/internal/wizard"
 )
 
 func validateOptionalCIDR(s string) error {
@@ -203,12 +205,71 @@ func (m *Model) buildTailscaleForm() *huh.Form {
 	).WithTheme(huh.ThemeFunc(huh.ThemeDracula)).WithShowHelp(true).WithWidth(80)
 }
 
+// buildUcoreForm creates the huh form for the uCore image step.
+//
+// uCore ships no ISO, so the four selects here are the whole of "which uCore":
+// the image family, the release stream, the NVIDIA driver baked into the tag,
+// and whether the image signature is enforced during the rebase. The resulting
+// reference is previewed live so the user can see exactly what will be pulled.
+func (m *Model) buildUcoreForm() *huh.Form {
+	imageOptions := make([]huh.Option[string], 0, len(model.UcoreImages))
+	for _, img := range model.UcoreImages {
+		imageOptions = append(imageOptions, huh.NewOption(img.Label+" — "+img.Description, img.ID))
+	}
+
+	streamOptions := []huh.Option[string]{
+		huh.NewOption("stable — production stream", model.UcoreStreamStable),
+		huh.NewOption("testing — next stable candidate", model.UcoreStreamTesting),
+		huh.NewOption("lts — stable base with a longterm kernel", model.UcoreStreamLTS),
+	}
+
+	nvidiaOptions := []huh.Option[string]{
+		huh.NewOption("None — no NVIDIA driver", ""),
+		huh.NewOption("nvidia — latest open driver", model.UcoreNvidiaOpen),
+		huh.NewOption("nvidia-lts — LTS driver (Maxwell/Pascal)", model.UcoreNvidiaLTS),
+	}
+
+	verifyOptions := []huh.Option[string]{
+		huh.NewOption("Verify signature — recommended (ostree-image-signed)", model.UcoreVerifySigned),
+		huh.NewOption("Skip verification — faster, not signature-checked", model.UcoreVerifyUnverified),
+	}
+
+	return huh.NewForm(
+		huh.NewGroup(
+			huh.NewNote().
+				Title("uCore").
+				Description("uCore has no installer ISO: Fedora CoreOS is installed first, then this machine\nreboots once to rebase itself onto the uCore image chosen below."),
+			huh.NewSelect[string]().
+				Title("Image").
+				Options(imageOptions...).
+				Value(&m.ucoreImageIn),
+			huh.NewSelect[string]().
+				Title("Stream").
+				Options(streamOptions...).
+				Value(&m.ucoreStreamIn),
+			huh.NewSelect[string]().
+				Title("NVIDIA driver").
+				Description("uCore ships its driver inside the image tag rather than as a sysext").
+				Options(nvidiaOptions...).
+				Value(&m.ucoreNvidiaIn),
+			huh.NewSelect[string]().
+				Title("Image signature").
+				Description("Whether rpm-ostree verifies the image's sigstore signature while rebasing").
+				Options(verifyOptions...).
+				Value(&m.ucoreVerifyIn),
+		),
+	).WithTheme(huh.ThemeFunc(huh.ThemeDracula)).WithShowHelp(true).WithWidth(80)
+}
+
 // buildReviewForm creates the huh confirm for the Review step.
 func (m *Model) buildReviewForm() *huh.Form {
 	cfg := &m.Wizard.State.Config
 	title := "⚠️  DESTRUCTIVE OPERATION — Install Flatcar to disk?"
 	if cfg.OS == model.OSFCOS {
 		title = "⚠️  DESTRUCTIVE OPERATION — Install Fedora CoreOS to disk?"
+	}
+	if cfg.OS == model.OSUcore {
+		title = "⚠️  DESTRUCTIVE OPERATION — Install uCore to disk?"
 	}
 
 	dangerTheme := huh.ThemeFunc(func(isDark bool) *huh.Styles {
@@ -273,15 +334,28 @@ func (m *Model) reviewSummary() string {
 	b.WriteString("\n\n")
 	b.WriteString("Install Plan\n")
 	if cfg.OS != "" {
-		fmt.Fprintf(&b, "  OS: %s\n", cfg.OS)
+		fmt.Fprintf(&b, "  OS: %s\n", model.OSDisplayName(cfg.OS))
 	}
-	fmt.Fprintf(&b, "  Channel: %s", cfg.Channel)
+	fmt.Fprintf(&b, "  Channel: %s", cfg.ReleaseLabel())
 	if cfg.Version != "" {
 		fmt.Fprintf(&b, " (v%s)", cfg.Version)
+	}
+	// Spell out the rebase target: it is the part of a uCore install that
+	// happens after this confirmation and is invisible in the plan otherwise.
+	if cfg.OS == model.OSUcore {
+		fmt.Fprintf(&b, "\n  uCore image: %s", cfg.Ucore.WithDefaults().ImageReference())
 	}
 	fmt.Fprintf(&b, "\n  Network: %s", cfg.Network.Mode)
 	if cfg.Network.Mode == model.NetworkStatic {
 		fmt.Fprintf(&b, " — %s via %s", cfg.Network.Address, cfg.Network.Gateway)
+	}
+	// List the WiFi networks that will be written to the target. The user
+	// cannot see these after this screen, so naming them matters.
+	if wifiHasProfiles(cfg) {
+		fmt.Fprintf(&b, "\n  WiFi: %s", strings.Join(cfg.Wifi.SSIDs(), ", "))
+		if !cfg.Wifi.ApplyAppliesToTarget(cfg.OS) {
+			fmt.Fprintf(&b, "  ⚠ not applied on %s (uses systemd-networkd)", model.OSDisplayName(cfg.OS))
+		}
 	}
 	fmt.Fprintf(&b, "\n  Hostname: %s", cfg.Hostname)
 	if len(cfg.Users) > 0 {
@@ -367,11 +441,15 @@ func (m *Model) renderZenChrome() string {
 	cfg := &m.Wizard.State.Config
 	if m.Wizard.State.CurrentStep != model.StepWelcome {
 
-		// Channel as label, versions as tight key:value with │ separators
+		// Channel as label, versions as tight key:value with │ separators.
+		// The bakery version detail is Flatcar-only, and the label comes from
+		// ReleaseLabel so a uCore target shows its own stream rather than the
+		// unused Channel field.
+		release := cfg.ReleaseLabel()
 		var verInfo string
 		if len(m.Wizard.State.Channels) > 0 {
 			for _, ch := range m.Wizard.State.Channels {
-				if ch.Channel == cfg.Channel {
+				if ch.Channel == release {
 					verInfo = accentColor.Render(ch.Channel) +
 						dimColor.Render(" \u2502 ") +
 						infoColor.Render("v"+ch.Version) +
@@ -384,7 +462,7 @@ func (m *Model) renderZenChrome() string {
 			}
 		}
 		if verInfo == "" {
-			verInfo = accentColor.Render(cfg.Channel)
+			verInfo = accentColor.Render(release)
 		}
 
 		b.WriteString("  ")
@@ -409,8 +487,9 @@ func (m *Model) renderZenChrome() string {
 		b.WriteString("\n")
 	} // end if not Welcome
 
-	// Step progress: thin line
-	steps := 8
+	// Step progress: thin line. Width follows the wizard's own step count so
+	// the bar cannot drift out of sync when a step is added.
+	steps := wizard.StepCount()
 	current := int(m.Wizard.State.CurrentStep)
 	b.WriteString("  ")
 	for i := 0; i < steps; i++ {
@@ -431,12 +510,20 @@ func (m *Model) renderZenChrome() string {
 }
 
 // channelList returns the ordered list of channel/stream keys for the card selector.
-// For FCOS, returns the three release streams; for Flatcar, the four channels.
+// Each OS publishes its own vocabulary, so the list is per-OS: FCOS uses its
+// three release streams, uCore its own three (which include "lts"), and
+// Flatcar its four channels.
 func (m *Model) channelList() []string {
-	if m.Wizard.State.Config.OS == model.OSFCOS {
+	switch m.Wizard.State.Config.OS {
+	case model.OSFCOS:
 		return []string{"stable", "testing", "next"}
+	case model.OSUcore:
+		// model.UcoreStreams is the same set the validator accepts, so the
+		// cards and the gate cannot drift apart.
+		return slices.Clone(model.UcoreStreams)
+	default:
+		return []string{"stable", "lts", "beta", "alpha"}
 	}
-	return []string{"stable", "lts", "beta", "alpha"}
 }
 
 // channelCardCount returns how many channel/stream cards to display.
@@ -476,6 +563,18 @@ func (m *Model) getChannelMeta() []channelMeta {
 					break
 				}
 			}
+		}
+		return metas
+	}
+
+	if m.Wizard.State.Config.OS == model.OSUcore {
+		descs := map[string]string{
+			model.UcoreStreamStable:  "Production uCore stream. Recommended for most deployments.",
+			model.UcoreStreamTesting: "Next stable candidate. Validates upcoming stable releases.",
+			model.UcoreStreamLTS:     "Stable base with a longterm kernel. Fewer surprises, older hardware support.",
+		}
+		for i, ch := range channels {
+			metas[i] = channelMeta{name: ch, desc: descs[ch]}
 		}
 		return metas
 	}
@@ -532,9 +631,12 @@ func (m *Model) viewChannelCards() string {
 	descStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 	cursorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Bold(true)
 
-	if cfg.OS == model.OSFCOS {
+	switch cfg.OS {
+	case model.OSFCOS:
 		b.WriteString("  Select a Fedora CoreOS stream:\n\n")
-	} else {
+	case model.OSUcore:
+		b.WriteString("  Select a uCore release stream:\n\n")
+	default:
 		b.WriteString("  Select a release channel:\n\n")
 	}
 
@@ -599,9 +701,12 @@ func (m *Model) viewChannelCards() string {
 	link := lipgloss.NewStyle().Foreground(lipgloss.Color("75"))
 	b.WriteString(dim.Render("  Ctrl+A advanced options · ↑↓/jk select · enter continue"))
 	b.WriteString("\n\n")
-	if cfg.OS == model.OSFCOS {
+	switch cfg.OS {
+	case model.OSFCOS:
 		b.WriteString(dim.Render("  Fedora CoreOS community: ") + link.Render("https://discussion.fedoraproject.org/tag/coreos"))
-	} else {
+	case model.OSUcore:
+		b.WriteString(dim.Render("  uCore (ublue-os): ") + link.Render("https://github.com/ublue-os/ucore"))
+	default:
 		b.WriteString(dim.Render("  Join the Flatcar community: ") + link.Render("https://flatcar.org/discord"))
 	}
 	b.WriteString("\n")

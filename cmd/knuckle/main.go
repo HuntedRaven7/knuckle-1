@@ -68,7 +68,7 @@ func main() {
 	flag.StringVar(&configFile, "config", "", "path to JSON config file for headless install")
 	flag.BoolVar(&headlessMode, "headless", false, "run without TUI (requires --config)")
 	flag.BoolVar(&demoMode, "demo", false, "run with mock hardware/catalog data for UI demos and recording (no network, no real disks)")
-	flag.StringVar(&targetOS, "os", "", "pre-select target OS and skip the welcome screen (flatcar, fcos, bluefin-ddi)")
+	flag.StringVar(&targetOS, "os", "", "pre-select target OS and skip the welcome screen (flatcar, fcos, ucore, bluefin-ddi)")
 	var flatcarVersion string
 	flag.StringVar(&flatcarVersion, "flatcar-version", "", "pin to specific Flatcar version (e.g. 3510.2.8)")
 	flag.Parse()
@@ -137,6 +137,7 @@ func main() {
 		installer = &install.DispatchingInstaller{
 			Flatcar:    install.NewFlatcarInstaller(cmdRunner, logger),
 			FCOS:       install.NewFCOSInstaller(cmdRunner, logger),
+			Ucore:      install.NewUcoreInstaller(cmdRunner, logger),
 			BluefinDDI: install.NewBluefinDDIInstaller(cmdRunner, logger),
 		}
 	}
@@ -147,12 +148,12 @@ func main() {
 	w.State.Config.DryRun = dryRun || demoMode
 	w.State.Config.Version = flatcarVersion
 
-	// --os pre-selects the target OS and skips the welcome screen entirely,
-	// jumping straight to disk selection. Used by installer.service on the
-	// bluefin-server live image (ExecStart=/opt/knuckle --os bluefin-ddi).
+	// --os pre-selects the target OS and skips the welcome screen entirely.
+	// Used by installer.service on purpose-built live images
+	// (ExecStart=/opt/knuckle --os bluefin-ddi, or --os ucore on the uCore ISO).
 	if targetOS != "" {
 		w.State.Config.OS = targetOS
-		w.State.CurrentStep = model.StepStorage
+		w.State.CurrentStep = initialStepForOS(targetOS)
 	}
 
 	ctx := context.Background()
@@ -188,6 +189,21 @@ func main() {
 	}
 
 	logger.Info("knuckle finished")
+}
+
+// initialStepForOS returns the wizard step to jump to when --os has already
+// chosen the target OS.
+//
+// Everything except uCore goes straight to disk selection, because the OS
+// picker had nothing left to ask. uCore is the exception: which image family,
+// stream, NVIDIA variant and signature mode to install is still the user's
+// decision, so --os ucore lands on the uCore image step rather than skipping
+// past it and silently installing the defaults.
+func initialStepForOS(targetOS string) model.WizardStep {
+	if targetOS == model.OSUcore {
+		return model.StepUcore
+	}
+	return model.StepStorage
 }
 
 // runHeadless loads a JSON config and runs the install without TUI.

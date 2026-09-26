@@ -213,8 +213,9 @@ func TestKeyboard_Esc_StorageGoesBack(t *testing.T) {
 	newModel, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	tuiModel := newModel.(*Model)
 
-	if tuiModel.Wizard.State.CurrentStep != model.StepNetwork {
-		t.Errorf("esc on Storage: expected StepNetwork, got %v", tuiModel.Wizard.State.CurrentStep)
+	// Storage is preceded by the WiFi step.
+	if tuiModel.Wizard.State.CurrentStep != model.StepWifi {
+		t.Errorf("esc on Storage: expected StepWifi, got %v", tuiModel.Wizard.State.CurrentStep)
 	}
 }
 

@@ -36,8 +36,14 @@ func TestFullWizardNavigation(t *testing.T) {
 	// Simulate Network form complete
 	cmd = m.onFormComplete()
 	_ = cmd
+	if m.Wizard.State.CurrentStep != model.StepWifi {
+		t.Fatalf("after Network complete: expected Wifi, got %v", m.Wizard.State.CurrentStep)
+	}
+
+	// Wifi is a manual step: skip it with 's'.
+	_, _ = m.handleWifiKey(tea.KeyPressMsg{Code: 's', Text: "s"})
 	if m.Wizard.State.CurrentStep != model.StepStorage {
-		t.Fatalf("after Network complete: expected Storage, got %v", m.Wizard.State.CurrentStep)
+		t.Fatalf("after Wifi skip: expected Storage, got %v", m.Wizard.State.CurrentStep)
 	}
 
 	// Storage is non-form: press Enter to advance
@@ -80,8 +86,9 @@ func TestBackNavigation(t *testing.T) {
 	newModel, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	tuiModel := newModel.(*Model)
 
-	if tuiModel.Wizard.State.CurrentStep != model.StepNetwork {
-		t.Errorf("expected Network after Esc from Storage, got %v", tuiModel.Wizard.State.CurrentStep)
+	// Storage is preceded by the WiFi step.
+	if tuiModel.Wizard.State.CurrentStep != model.StepWifi {
+		t.Errorf("expected Wifi after Esc from Storage, got %v", tuiModel.Wizard.State.CurrentStep)
 	}
 }
 

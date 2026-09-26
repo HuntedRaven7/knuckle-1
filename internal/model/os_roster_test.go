@@ -25,7 +25,7 @@ func TestOSTargetIDsAreInRosterOrder(t *testing.T) {
 // declared but never added to the roster. An unregistered constant is a target
 // the OS picker can never offer.
 func TestEveryOSConstantIsRegistered(t *testing.T) {
-	for _, id := range []string{OSFlatcar, OSFCOS, OSBluefinDDI} {
+	for _, id := range []string{OSFlatcar, OSFCOS, OSUcore, OSBluefinDDI} {
 		if !IsKnownOS(id) {
 			t.Errorf("OS constant %q is not in the OSTargets roster", id)
 		}
