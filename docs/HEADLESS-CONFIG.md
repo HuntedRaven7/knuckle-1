@@ -323,6 +323,43 @@ and the machine would boot with no network while looking correctly provisioned.
 > both, the profiles are written but nothing reads them. The TUI warns; headless
 > does not fail.
 
+#### What the target actually needs to join
+
+Supplying `profiles` is necessary but not sufficient on Fedora CoreOS, and this
+is worth knowing before you conclude a headless install came up without WiFi.
+
+`coreos-installer` lays down a **stock upstream** FCOS deployment — it is
+invoked with `--stream` and pulls the image from the registry. It does not
+inherit anything from the live ISO, and stock FCOS has no
+`NetworkManager-wifi` plugin and no adapter firmware. A keyfile on its own is
+inert: NetworkManager ignores a profile for a device type it has no driver for.
+
+So when `wifi.profiles` is non-empty and the target is a NetworkManager OS,
+knuckle also emits `knuckle-wifi-stack.service`, a first-boot oneshot that
+layers `NetworkManager-wifi`, `wpa_supplicant`, `wireless-regdb` and the
+per-vendor firmware blobs with `rpm-ostree`. Two operational consequences:
+
+- **The target needs working network on its first boot** to fetch those
+  packages. A machine with no ethernet connected cannot pull its own WiFi
+  firmware. Upstream Fedora documents the same constraint.
+- **The machine reboots once** after layering, because `rpm-ostree` stages a
+  deployment and the packages are not live until it boots.
+
+The firmware pass is deliberately failure-tolerant: it is the one `ExecStart`
+carrying systemd's `-` prefix, so an unresolvable blob name costs the adapter
+firmware but not the `NetworkManager-wifi` plugin. The layer itself is
+unguarded, so a first boot with no network leaves the unit to retry instead of
+recording success.
+
+For uCore the unit waits for `ucore-knuckle-autorebase.service` to have
+completed — the rebase replaces the whole deployment, so anything layered before
+it finishes would be discarded.
+
+The ISO the install runs from is a separate question: a custom medium built with
+`just build-wifi-base-iso` is what lets `nmtui` *scan* during the install, but it
+has no effect on the packages the target ends up with. See
+`docs/skills/testlab.md` § Building a WiFi-capable live ISO.
+
 ---
 
 ### Tailscale

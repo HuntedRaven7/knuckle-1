@@ -14,6 +14,28 @@ import "strings"
 // uses systemd-networkd and Bluefin Server is a DDI image with no Ignition at
 // all, so on those targets the profiles are written but inert — the TUI says so
 // explicitly rather than implying the machine will come up on WiFi.
+//
+// # Phase 2 needs phase 3
+//
+// A keyfile on its own is inert. coreos-installer lays down a *stock* upstream
+// Fedora CoreOS deployment — it is invoked with --stream and pulls the image
+// from the registry — so the installed machine has neither the NetworkManager
+// WiFi plugin nor any adapter firmware, and NetworkManager ignores a profile
+// for a device type it cannot drive. This holds even for a machine installed
+// from a custom live ISO: the live environment's package set is not inherited by
+// the target.
+//
+// So the FCOS and uCore generators also emit a first-boot oneshot that layers
+// those packages (see ignition.addWifiStackUnit). Consequences worth knowing:
+//
+//   - The target needs working network on its first boot to download them. A
+//     machine with no ethernet connected cannot fetch its own WiFi firmware.
+//   - Layering stages a deployment, so the machine reboots once afterwards for
+//     the packages to take effect.
+//
+// The live environment is a separate problem with a separate fix — it needs a
+// live ISO that carries the firmware, not a layer. See
+// docs/skills/testlab.md § "Building a WiFi-capable live ISO".
 
 // NMConnectionDir is where NetworkManager keeps connection profiles.
 // Ignition writes the captured profiles here on the target system.
@@ -78,12 +100,12 @@ const ManualProfileFilename = "manual-wifi.nmconnection"
 // BuildWifiKeyfile renders a NetworkManager keyfile for a network the user
 // supplied by hand.
 //
-// This exists because nmtui cannot scan on a minimal live image: Fedora's
-// CoreOS live environment ships without wireless firmware and commonly without
-// nmtui itself, so there may be no radio to scan with. The point of the WiFi step
-// is to get the *installed* system onto a network, and the full uCore image
-// ships the firmware, so a hand-built keyfile still lands the machine on WiFi
-// even when the installer could never see a network itself.
+// This exists because the installer may have no radio to scan with even when the
+// user knows their network perfectly well. The live image ships no wireless
+// firmware by default, so nmtui can launch and still find nothing; the fallback
+// is to type the details in. Because the *installed* system gets the WiFi stack
+// layered onto it (see the package note), a hand-built keyfile does land the
+// machine on WiFi even when the installer could never see a network itself.
 //
 // The output is a standard PSK keyfile. The password is written verbatim into
 // the psk field, which NetworkManager accepts for WPA-PSK.

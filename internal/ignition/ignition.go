@@ -228,6 +228,11 @@ func (g *Generator) GenerateFCOSButane(cfg *model.InstallConfig) (string, error)
 	if err := addWifiProfiles(b, cfg); err != nil {
 		return "", err
 	}
+	// Layering, not just the keyfile: the deployment coreos-installer writes is
+	// stock upstream FCOS, so without this the profile has no plugin to read it.
+	if err := addWifiStackUnit(b, cfg, false); err != nil {
+		return "", err
+	}
 
 	return b.BuildFCOS(), nil
 }

@@ -83,6 +83,13 @@ func (g *Generator) GenerateUcoreButane(cfg *model.InstallConfig) (string, error
 	if err := addWifiProfiles(b, cfg); err != nil {
 		return "", err
 	}
+	// Gated on the rebase sentinel: the autorebase unit above swaps the whole
+	// deployment for the uCore image, so anything layered before it completes is
+	// thrown away. Waiting for an earlier boot's rebase is what makes the stack
+	// survive.
+	if err := addWifiStackUnit(b, cfg, true); err != nil {
+		return "", err
+	}
 
 	return b.BuildFCOS(), nil
 }

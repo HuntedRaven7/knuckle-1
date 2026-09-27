@@ -1,0 +1,22 @@
+# knuckle's override of the upstream image.yaml.
+#
+# Included by cosa_config_materialize in place of upstream's image.yaml, which is
+# a one-line `include: image-base.yaml`. Everything else (disk size, kernel
+# args, the EROFS live-rootfs settings) is inherited unchanged — the only value
+# overridden is container-imgref, and it is overridden for safety.
+#
+# Upstream sets:
+#
+#   container-imgref: "ostree-image-signed:docker://quay.io/fedora/fedora-coreos:{stream}"
+#
+# That is the *official* Fedora CoreOS repository. This image is Fedora CoreOS
+# plus packages the FCOS project deliberately excludes (see fedora-coreos-tracker
+# #862), and it is built locally, unsigned by the Fedora release keys. Leaving
+# the upstream value in place means a `cosa push-container` would aim a modified
+# image at a repository whose contents are trusted as official by anyone
+# consuming it. Pointing it at a knuckle-owned name makes that an obvious
+# mistake rather than a silent one — the push fails with "repository does not
+# exist" unless somebody actually owns that path.
+include: image-base.yaml
+
+container-imgref: "ostree-image-signed:docker://quay.io/projectbluefin/knuckle-fcos-live-wifi:{stream}"

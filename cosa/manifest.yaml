@@ -1,0 +1,56 @@
+ref: knuckle/${basearch}/coreos
+
+# knuckle's WiFi-capable Fedora CoreOS live ISO.
+#
+# This is a *derived* config repo: it includes the upstream manifest wholesale
+# and adds only the packages needed to scan and join a wireless network from the
+# installer. The upstream pattern (see fedora-coreos-config/README.md "Layout")
+# is to keep fedora-coreos-config as a submodule and symlink its components in,
+# which is what cosa_config_materialize builds.
+#
+# Two things make this work without forking fedora-coreos-config:
+#
+#   - Unlocked packages are fine. A package named in `packages:` but absent from
+#     manifest-lock.<arch>.json is resolved to the newest build in the enabled
+#     repos — upstream keeps `fedora` and `fedora-updates` enabled precisely so
+#     packages can be added. Only `cosa build --strict` rejects that, and this
+#     build does not use it. The consequence to be aware of: the firmware below
+#     is *not* version-pinned, so two builds a month apart can differ.
+#
+#   - There is no live-only package list. The live ISO's rootfs is the same
+#     deployed tree as the metal and qemu images, so these packages land
+#     everywhere.
+include:
+  - fedora-coreos-config/manifest.yaml
+
+# The NetworkManager WiFi plugin itself. On stock FCOS this is a single library
+# (libnm-device-plugin-wifi.so) that nmtui needs before it can scan anything;
+# it pulls in wpa_supplicant and wireless-regdb, named here because the live ISO
+# is useless without them and an explicit list documents the requirement.
+#
+# Note what nmtui itself is NOT: NetworkManager-tui is already in upstream's
+# manifests/networking-tools.yaml, so it is absent from this list on purpose.
+packages:
+  - NetworkManager-wifi
+  - wpa_supplicant
+  - wireless-regdb
+
+  # Adapter firmware. These are per-vendor subpackages of linux-firmware, and
+  # they have to be named individually: Fedora made them Recommends rather than
+  # Requires, and FCOS composes with "recommends: false", so installing
+  # `linux-firmware` resolves to no wireless firmware at all. There is no
+  # `linux-firmware-free` / `linux-firmware-nonfree` to ask for instead.
+  #
+  # iwlwifi-mld-firmware and iwlbluetooth-firmware are omitted because they were
+  # split out too recently to exist on every stream this installer supports;
+  # current iwlwifi-mvm-firmware Requires them where they do exist.
+  - atheros-firmware
+  - brcmfmac-firmware
+  - iwlegacy-firmware
+  - iwlwifi-dvm-firmware
+  - iwlwifi-mvm-firmware
+  - libertas-firmware
+  - mt7xxx-firmware
+  - nxpwireless-firmware
+  - realtek-firmware
+  - tiwilink-firmware

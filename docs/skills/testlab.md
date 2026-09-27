@@ -96,6 +96,20 @@ GitHub releases are changelogs with an empty `assets` array, images live on
 offers uCore as a target choice; the target disk gets a CoreOS deployment that a
 first-boot `rpm-ostree rebase` turns into uCore.
 
+### Custom live medium (`just build-wifi-base-iso`)
+
+Both scripts above accept `--base-iso` (or `KNUCKLE_BASE_ISO`) to substitute a
+custom live medium for the downloaded stock one. That is the hook the
+WiFi-capable medium plugs into — see "Building a WiFi-capable live ISO" under
+The WiFi step. `fetch_live_iso` in `scripts/lib/coreos-iso.sh` is the only
+consumer, and it validates that the path exists before using it.
+
+**A custom medium does not change what lands on the target disk.**
+`coreos-installer` is always invoked with `--stream`, so the installed system is
+a stock upstream FCOS deployment regardless of what the live ISO contained. WiFi
+on the *installed* machine is handled by the first-boot layering unit in
+`internal/ignition/wifi.go`, not by the medium.
+
 ### Verifying the built ISO (no boot required)
 
 ```bash
@@ -190,26 +204,50 @@ go test ./internal/ignition/ -run Wifi -v
 
 This trips people up, so the reasoning is recorded here.
 
-**Minimal CoreOS live media has no wireless firmware, and often no nmtui
-either.** Fedora's own wiki lists `nmtui` as the separate `NetworkManager-tui`
-package, and a 2026-08-07 Fedora discussion thread on exactly the uCore case
-requires `rpm-ostree install NetworkManager-wifi iwlwifi-mvm-firmware`, linking
-to "building an iso with wifi pre-installed". So on the stock FCOS live ISO that
-the knuckle uCore ISO is built from, nmtui launches and finds nothing, because
-there is no radio to scan with.
+**The stock FCOS live ISO has nmtui but cannot use it.** This is the detail that
+sends people looking in the wrong place. `NetworkManager-tui` *is* in upstream's
+`manifests/networking-tools.yaml`, so the binary is present and `nmtui` launches
+fine. What is missing is `NetworkManager-wifi` — a single plugin library,
+`libnm-device-plugin-wifi.so` — plus `wpa_supplicant` and any adapter firmware.
+nmtui starts, has no device type to show, and looks broken. In practice the
+diagnostic you see on stock media is the *second* one below; the "nmtui is not
+installed" branch is for a genuinely stripped image.
 
-**Building your own uCore does not fix this.** uCore's README notes the full
-`ucore` image adds "all wireless (wifi) card firmwares (CoreOS does not include
-them)" — but that is the *installed* system. The live medium of the uCore
-installer ISO is the stock FCOS live ISO, not uCore, so firmware baked into a
-uCore image never reaches the installer environment. Making the installer scan
-would need a custom **live ISO** (coreos-assembler) carrying
-`NetworkManager-tui`, `NetworkManager-wifi` and `linux-firmware`.
+**`linux-firmware` does not give you WiFi firmware on Fedora.** This is the
+other thing that sends people down a rabbit hole. Fedora split the wireless
+blobs out of `linux-firmware` into per-vendor subpackages and made them
+`Recommends` rather than `Requires`. FCOS composes with `recommends: false`, so
+`linux-firmware` resolves to *no* wireless firmware at all on a CoreOS base.
+There is no `linux-firmware-free` / `linux-firmware-nonfree` to ask for instead
+— the split is by vendor, not by licence. The names that work are
+`iwlwifi-mvm-firmware`, `iwlwifi-dvm-firmware`, `brcmfmac-firmware`,
+`atheros-firmware`, `mt7xxx-firmware`, `realtek-firmware` and friends. There is
+no `iwlwifi-ucode` either.
 
-**That is why the step has a manual fallback.** The step's goal is to get the
-*installed* system onto a network, and the full uCore image does ship the
-firmware — so a hand-entered keyfile still lands the machine on WiFi even
-though the installer could never see a network. Press `m`.
+**Building your own uCore does not fix the installer.** uCore's README notes the
+full `ucore` image adds "all wireless (wifi) card firmwares (CoreOS does not
+include them)" — but that is the *installed* system. The live medium of the
+uCore installer ISO is the stock FCOS live ISO, so firmware baked into a uCore
+image never reaches the installer environment. See "Building a WiFi-capable
+live ISO" below for the fix.
+
+**The installed system is a separate problem with a separate fix.** A keyfile
+alone is inert: `coreos-installer` is invoked with `--stream` and lays down a
+*stock* upstream FCOS deployment, it does not derive the target from the live
+ISO's package set. So even installing from a firmware-carrying custom ISO leaves
+the target without a WiFi plugin. `internal/ignition/wifi.go` emits a first-boot
+oneshot that layers the stack (`ignition.addWifiStackUnit`), following the
+upstream Fedora recipe. Two consequences to know about:
+
+- **The target needs network on its first boot** to fetch those packages. A
+  machine with no ethernet connected cannot pull its own WiFi firmware. The
+  Fedora docs call this out; it is inherent to layering, not a knuckle bug.
+- **Layering stages a deployment, so the machine reboots once** afterwards.
+
+**That is also why the step has a manual fallback.** Press `m` to type details
+in by hand when the installer cannot see a network. Because the stack is layered
+onto the target, the hand-built keyfile does land the machine on WiFi — the
+firmware does not have to be visible from the installer at all.
 
 **Do not hardcode "CoreOS has no WiFi".** `Wizard.WifiPreflight` probes the
 running machine (`runner.LookPath("nmtui")` plus `/sys/class/net/*/wireless`) and
@@ -219,8 +257,62 @@ step automatically.
 If the step seems broken, check the diagnosis it now prints before suspecting
 the wizard:
 
-- `nmtui is not installed on this live image` — expected on stock FCOS media
-- `No wireless adapter detected` — no firmware/driver for the adapter
+- `nmtui is not installed on this live image` — only on a stripped image; stock
+  FCOS media has nmtui
+- `No wireless adapter detected` — the usual one on stock FCOS: the WiFi plugin
+  and firmware are missing, so there is no radio to scan with
+
+### Building a WiFi-capable live ISO
+
+`just build-wifi-base-iso` produces a live medium that carries the WiFi stack, so
+nmtui can actually scan. Hand the result to the installer build with
+`KNUCKLE_BASE_ISO`:
+
+```bash
+just build-wifi-base                                     # hours, ~200GB disk
+KNUCKLE_BASE_ISO=output/knuckle-wifi-base-testing-devel-x86_64.iso just build-fcos-iso
+```
+
+**What it costs.** This is a real Fedora CoreOS build, not a repack: podman,
+`/dev/kvm`, ~10.5 GiB RAM, 6 CPUs, ~200 GB free disk (about 50 GB of that is
+the supermin cache) and a couple of hours. It cannot run in CI, which is why the
+repo covers the config materialisation and ISO discovery in BATS and leaves the
+build itself to the operator.
+
+**How it works.** `cosa/manifest.yaml` includes upstream's `manifest.yaml` and
+adds `NetworkManager-wifi` plus the vendor firmware.
+`scripts/lib/cosa-config.sh` materialises the derived config repo: it clones
+`fedora-coreos-config` and symlinks its components in, which is the layout
+upstream's own README recommends. `cosa/image.yaml` overrides one value for
+safety — see below.
+
+Four things that are easy to get wrong here:
+
+1. **There is no live-only package list.** The live ISO's rootfs is the same
+   deployed tree as the metal and qemu images, so added packages land
+   everywhere. There is no way to add firmware to just the live target.
+2. **The lockfile does not need updating.** A package in `packages:` that is
+   absent from `manifest-lock.<arch>.json` resolves to the newest build in the
+   enabled repos; only `cosa build --strict` rejects that, and this build does
+   not use it. The tradeoff is that the added firmware is *not* version-pinned.
+   (`cosa fetch --update-lockfile` no longer exists, so hand-editing the
+   lockfile is the only alternative if you ever do need a pin.)
+3. **`overlay.d` must be symlinked as a whole directory.** On the Fedora-ID
+   branch of `manifests/shared-el.yaml` the `ostree-layers` entries are relative
+   (`overlay.d/05core`), not submodule-qualified, so the derived repo has to
+   present those directories itself.
+4. **`container-imgref` is overridden deliberately.** Upstream points it at
+   `quay.io/fedora/fedora-coreos` — the official repository. This image is FCOS
+   plus packages the FCOS project deliberately excludes, built locally and not
+   signed by the Fedora release keys. Leaving that value in place would let a
+   `cosa push-container` aim a modified image at a repo whose contents are
+   trusted as official. `cosa/image.yaml` points it at a knuckle-owned name so
+   the mistake is loud rather than silent.
+
+**Supply-chain note.** Because the added packages are not lockfile-pinned and
+the image is not signed by Fedora, treat a locally built medium as a development
+artifact. Do not distribute it as a release, and do not re-tag it as official
+Fedora CoreOS.
 
 ## Agent Limitations
 

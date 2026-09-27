@@ -32,6 +32,10 @@ default:
     @echo "  just build-ucore-iso     — build a uCore installer ISO"
     @echo "  just build-ucore-iso arch=arm64 stream=testing"
     @echo ""
+    @echo "WiFi-capable live medium (needs podman + /dev/kvm, hours, ~200GB disk):"
+    @echo "  just build-wifi-base-iso                              — build a live ISO with wireless firmware"
+    @echo "  KNUCKLE_BASE_ISO=output/knuckle-wifi-base-stable-x86_64.iso just build-fcos-iso"
+    @echo ""
     @echo "Pre-release (requires network):"
     @echo "  just catalog-check       — report new bakery extensions missing descriptions"
     @echo "  just nvidia-check        — verify NVIDIA driver series vs Flatcar docs"
@@ -919,7 +923,14 @@ tools-fcos:
 
 # Build FCOS installer ISO (requires coreos-installer — run: just tools-fcos)
 # Produces output/knuckle-fcos-installer-<stream>-<arch>.iso
+#
 # Override stream/arch: just build-fcos-iso arch="arm64" stream="testing"
+#
+# To build on a custom live medium instead of the stock FCOS ISO, set
+# KNUCKLE_BASE_ISO (consumed by scripts/lib/coreos-iso.sh):
+#   KNUCKLE_BASE_ISO=output/knuckle-wifi-base-stable-x86_64.iso just build-fcos-iso
+# The usual reason is that only a custom medium carries wireless firmware, so
+# the installer's WiFi step can actually scan.
 build-fcos-iso arch="amd64" stream="stable": check-fcos-tools
     ./scripts/build-fcos-iso.sh --arch {{arch}} --stream {{stream}}
 
@@ -932,8 +943,25 @@ build-fcos-iso arch="amd64" stream="stable": check-fcos-tools
 # are chosen in the wizard, or pinned via headless config.
 #
 # Override stream/arch: just build-ucore-iso arch="arm64" stream="testing"
+# Custom medium:      KNUCKLE_BASE_ISO=output/knuckle-wifi-base-stable-x86_64.iso just build-ucore-iso
 build-ucore-iso arch="amd64" stream="stable": check-fcos-tools
     ./scripts/build-ucore-iso.sh --arch {{arch}} --stream {{stream}}
+
+# Build a WiFi-capable FCOS live ISO to use as a custom installer medium.
+# Produces output/knuckle-wifi-base-<stream>-<arch>.iso
+#
+# The stock FCOS live ISO has nmtui but no NetworkManager-wifi plugin and no
+# wireless firmware, so nmtui finds no radio and the WiFi step can only fall
+# back to hand-entered details. This rebuilds the medium with those packages.
+#
+# This is a full Fedora CoreOS build, not a repack: it needs podman and
+# /dev/kvm, ~10.5 GiB RAM, 6 CPUs and ~200 GB free disk, and runs for hours.
+# It cannot run in CI. Build once, then hand the result to build-fcos-iso or
+# build-ucore-iso via KNUCKLE_BASE_ISO.
+#
+# Override stream/arch: just build-wifi-base-iso stream="stable" arch="aarch64"
+build-wifi-base-iso stream="testing-devel" arch="x86_64":
+    ./scripts/build-wifi-base-iso.sh --stream {{stream}} --arch {{arch}}
 
 # Boot ISO in QEMU with UEFI (Ctrl-a x to quit)
 # KNUCKLE_ARCH=arm64 just boot-iso  — boots arm64 ISO (requires qemu-system-aarch64)
@@ -1275,7 +1303,10 @@ shell-lint: _install-shellcheck
       scripts/build-iso.sh \
       scripts/build-fcos-iso.sh \
       scripts/build-ucore-iso.sh \
+      scripts/build-wifi-base-iso.sh \
+      scripts/cosa.sh \
       scripts/lib/coreos-iso.sh \
+      scripts/lib/cosa-config.sh \
       scripts/lib/verify-flatcar.sh \
       scripts/lib/vm-kubevirt.sh \
       scripts/fix-ghost-otel-process-noise.sh \

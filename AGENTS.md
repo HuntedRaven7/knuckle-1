@@ -53,6 +53,20 @@ escape hatch either — it is a read-only EROFS image. Put binaries on the ISO
 with `xorriso -map ... -boot_image any replay` and stage them at boot.
 See `docs/skills/testlab.md` § ISO Architecture.
 
+**The live medium's package set is not the installed system's.** Two independent
+WiFi fixes, because they are two different problems:
+
+| Where | Problem | Fix |
+| ----- | ------- | --- |
+| Installer (live ISO) | Stock FCOS media has no `NetworkManager-wifi` plugin and no firmware, so nmtui finds no radio | `just build-wifi-base-iso` → `KNUCKLE_BASE_ISO=…` |
+| Target disk | `coreos-installer` writes **stock upstream** FCOS (`--stream`), so a keyfile is inert | first-boot layering unit, `ignition.addWifiStackUnit` |
+
+Building only the custom ISO does *not* give the installed machine WiFi, and
+layering alone does not let nmtui scan. `linux-firmware` is not the answer to
+either: Fedora made the wireless blobs `Recommends` subpackages and FCOS composes
+with `recommends: false`, so it resolves to no WiFi firmware. Name the per-vendor
+packages. See `docs/skills/testlab.md` § Building a WiFi-capable live ISO.
+
 Anything outside this list belongs in an issue, not a PR.
 
 ---
@@ -85,6 +99,7 @@ just vm-e2e              # automated 4-pass: DHCP · static · sysext · NVIDIA
 just boot-iso            # build ISO → boot in QEMU GTK window (requires -cpu host)
 just build-fcos-iso      # FCOS live ISO with knuckle (stable, amd64)
 just build-ucore-iso     # uCore installer ISO (live medium is FCOS; target is uCore)
+just build-wifi-base-iso # WiFi-capable FCOS live ISO (podman + /dev/kvm, hours, ~200GB)
 just e2e                 # build ISO → boot in QEMU GTK window → interactive install
 ```
 
